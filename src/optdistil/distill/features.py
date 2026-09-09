@@ -51,16 +51,17 @@ def build_elementwise_features(
     def flat(tensor: Tensor) -> Tensor:
         return tensor.reshape(-1)
 
+    flat_grad = flat(grad)
     return torch.stack(
         (
-            flat(grad),
+            flat_grad,
             flat(momentum),
             flat(rms),
             flat(parameter),
             flat(grad.sign()),
             flat(grad.abs().log1p()),
-            torch.full_like(flat(grad), parameter_rms),
-            torch.full_like(flat(grad), progress),
+            parameter_rms.expand_as(flat_grad),
+            torch.full_like(flat_grad, progress),
         ),
         dim=-1,
     )
