@@ -1,7 +1,6 @@
 from __future__ import annotations
 
-import torch
-from torch import Tensor
+from torch import Tensor, full_like, stack
 
 
 FEATURE_NAMES = (
@@ -52,7 +51,7 @@ def build_elementwise_features(
         return tensor.reshape(-1)
 
     flat_grad = flat(grad)
-    return torch.stack(
+    return stack(
         (
             flat_grad,
             flat(momentum),
@@ -61,7 +60,7 @@ def build_elementwise_features(
             flat(grad.sign()),
             flat(grad.abs().log1p()),
             parameter_rms.expand_as(flat_grad),
-            torch.full_like(flat_grad, progress),
+            full_like(flat_grad, progress),
         ),
         dim=-1,
     )
