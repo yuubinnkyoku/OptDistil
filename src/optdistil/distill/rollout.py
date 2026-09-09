@@ -102,6 +102,31 @@ def collect_teacher_trajectory(
 
 
 @torch.no_grad()
+def rollout_teacher(
+    initial_parameter: Tensor,
+    task: OptimizationTask,
+    *,
+    teacher: TeacherOptimizer,
+    steps: int,
+) -> RolloutResult:
+    """Evaluate a fresh teacher instance without constructing student features."""
+    if steps <= 0:
+        raise ValueError("steps must be positive")
+
+    parameter = initial_parameter.detach().clone()
+    losses = [float(task.loss(parameter))]
+    for _ in range(steps):
+        grad = task.grad(parameter)
+        update = teacher.step(parameter, grad).detach()
+        parameter = parameter + update
+        losses.append(float(task.loss(parameter)))
+        if not torch.isfinite(parameter).all():
+            break
+
+    return RolloutResult(tuple(losses), parameter.detach().clone())
+
+
+@torch.no_grad()
 def rollout_student(
     student: nn.Module,
     initial_parameter: Tensor,
