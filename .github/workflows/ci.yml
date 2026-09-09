@@ -19,11 +19,11 @@ jobs:
           version: "0.12.10"
           python-version: "3.11"
           enable-cache: true
-      - name: Sync environment
-        run: uv sync --locked
+      - name: Sync CPU environment
+        run: uv sync --locked --extra cpu
       - name: Ruff
-        run: uv run ruff check .
+        run: uv run --locked --extra cpu ruff check .
       - name: Tests
-        run: uv run pytest -q
+        run: uv run --locked --extra cpu pytest -q
       - name: End-to-end smoke distillation
-        run: uv run python scripts/smoke_distill.py
+        run: uv run --locked --extra cpu python scripts/smoke_distill.py
