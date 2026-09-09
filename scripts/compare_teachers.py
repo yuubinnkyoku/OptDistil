@@ -26,11 +26,13 @@ from optdistil.distill.train import calibrate_student_magnitude, train_student
 from optdistil.students.tiny_mlp import TinyMLPOptimizer
 from optdistil.tasks.quadratic import QuadraticTask
 from optdistil.teachers.adamw import AdamWTeacher
+from optdistil.teachers.gradient_direction import GradientDirectionTeacher
 from optdistil.teachers.muon import MuonTeacher
 
 TeacherFactory = Callable[[float], object]
 ADAMW_LR_CANDIDATES = (0.01, 0.03, 0.06, 0.1, 0.2)
 MUON_LR_CANDIDATES = (0.01, 0.03, 0.06, 0.1, 0.2, 0.3, 0.4, 0.6, 0.8)
+GRADIENT_DIRECTION_LR_CANDIDATES = (0.01, 0.03, 0.06, 0.1, 0.2, 0.3, 0.4, 0.6, 0.8)
 STUDENT_SCALE_CANDIDATES = (0.25, 0.5, 0.75, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0, 8.0)
 OBJECTIVES: tuple[tuple[str, DistillationLossWeights], ...] = (
     ("joint", DistillationLossWeights(direction=0.7, magnitude=0.3)),
@@ -373,7 +375,7 @@ def summarize_seed_results(results: list[ComparisonResult]) -> list[SeedSummary]
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Compare tiny students distilled from tuned AdamW and Muon teachers."
+        description="Compare tiny students distilled from tuned optimizer teachers."
     )
     parser.add_argument("--train-tasks", type=int, default=4)
     parser.add_argument("--validation-tasks", type=int, default=4)
@@ -427,6 +429,11 @@ def main() -> None:
             "adamw",
             lambda lr: AdamWTeacher(lr=lr, betas=(0.9, 0.99)),
             ADAMW_LR_CANDIDATES,
+        ),
+        (
+            "gradient_direction",
+            lambda lr: GradientDirectionTeacher(lr=lr),
+            GRADIENT_DIRECTION_LR_CANDIDATES,
         ),
         (
             "muon",
@@ -488,12 +495,13 @@ def main() -> None:
     summaries = summarize_seed_results(results)
 
     payload = {
-        "experiment": "expanded_sweep_multi_seed_objective_ablation",
+        "experiment": "teacher_information_baseline_multi_seed",
         "train_tasks": args.train_tasks,
         "validation_tasks": args.validation_tasks,
         "test_tasks": args.test_tasks,
         "teacher_lr_candidates": {
             "adamw": ADAMW_LR_CANDIDATES,
+            "gradient_direction": GRADIENT_DIRECTION_LR_CANDIDATES,
             "muon": MUON_LR_CANDIDATES,
         },
         "student_scale_candidates": STUDENT_SCALE_CANDIDATES,
