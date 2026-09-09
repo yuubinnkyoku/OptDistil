@@ -8,16 +8,26 @@ from optdistil.distill.losses import (
     distillation_loss,
     magnitude_loss,
 )
+from optdistil.distill.rollout import (
+    RolloutResult,
+    collect_teacher_trajectory,
+    evaluate_imitation,
+    rollout_student,
+)
 from optdistil.distill.trajectory import TrajectoryDataset, TrajectoryRecord
 
 __all__ = [
     "FEATURE_NAMES",
     "DistillationLossWeights",
+    "RolloutResult",
     "TrajectoryDataset",
     "TrajectoryRecord",
     "build_elementwise_features",
     "collect_teacher_step",
+    "collect_teacher_trajectory",
     "direction_loss",
     "distillation_loss",
+    "evaluate_imitation",
     "magnitude_loss",
+    "rollout_student",
 ]
