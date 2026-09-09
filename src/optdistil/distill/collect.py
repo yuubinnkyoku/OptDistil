@@ -4,7 +4,7 @@ from typing import Protocol
 
 from torch import Tensor
 
-from optdistil.distill.features import build_elementwise_features
+from optdistil.distill.features import FeatureBuilder, build_elementwise_features
 from optdistil.distill.trajectory import TrajectoryRecord
 from optdistil.students.tiny_mlp import StudentState
 
@@ -22,10 +22,11 @@ def collect_teacher_step(
     step: int,
     total_steps: int,
     teacher_name: str | None = None,
+    feature_builder: FeatureBuilder = build_elementwise_features,
 ) -> TrajectoryRecord:
     """Record one teacher update using observations available to the tiny student."""
     momentum, second_moment = student_state.observe(grad)
-    features = build_elementwise_features(
+    features = feature_builder(
         parameter,
         grad,
         momentum,
