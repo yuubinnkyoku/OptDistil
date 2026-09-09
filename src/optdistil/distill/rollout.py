@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import math
+from collections.abc import Iterable
 from dataclasses import dataclass
 from typing import Protocol
 
@@ -10,7 +12,7 @@ from optdistil.distill.collect import TeacherOptimizer, collect_teacher_step
 from optdistil.distill.features import FeatureBuilder, build_elementwise_features
 from optdistil.distill.losses import DistillationLossWeights, distillation_loss
 from optdistil.distill.trajectory import TrajectoryRecord
-from optdistil.students.tiny_mlp import StudentState
+from optdistil.students.tiny_mlp import StudentState, TinyMLPOptimizer
 
 
 class OptimizationTask(Protocol):
@@ -42,6 +44,15 @@ class RolloutResult:
     @property
     def finite(self) -> bool:
         return all(torch.isfinite(torch.tensor(value)).item() for value in self.losses)
+
+
+@dataclass(frozen=True, slots=True)
+class ScaleSelectionResult:
+    """Best non-trainable output scale selected on validation rollouts."""
+
+    scale: float
+    validation_loss_ratio: float
+    scores: tuple[tuple[float, float], ...]
 
 
 @torch.no_grad()
@@ -126,6 +137,55 @@ def rollout_student(
             break
 
     return RolloutResult(tuple(losses), parameter.detach().clone())
+
+
+@torch.no_grad()
+def select_student_output_scale(
+    student: TinyMLPOptimizer,
+    validation_cases: Iterable[tuple[Tensor, OptimizationTask]],
+    *,
+    candidates: Iterable[float],
+    steps: int,
+    feature_builder: FeatureBuilder = build_elementwise_features,
+) -> ScaleSelectionResult:
+    """Select one deployment scale using downstream validation loss, not teacher norms.
+
+    This is a tiny post-distillation hyperparameter search. It changes only the student's
+    non-trainable scalar buffer, so the learned optimizer remains the same size and the
+    deployment-time cost remains one scalar multiply per update tensor.
+    """
+    validation_cases = list(validation_cases)
+    candidates = list(candidates)
+    if not validation_cases:
+        raise ValueError("at least one validation case is required")
+    if not candidates:
+        raise ValueError("at least one scale candidate is required")
+    if steps <= 0:
+        raise ValueError("steps must be positive")
+
+    scores: list[tuple[float, float]] = []
+    for scale in candidates:
+        if not math.isfinite(scale) or scale <= 0.0:
+            raise ValueError("scale candidates must be positive and finite")
+        student.set_output_scale(scale)
+        ratios = []
+        for initial_parameter, task in validation_cases:
+            result = rollout_student(
+                student,
+                initial_parameter,
+                task,
+                steps=steps,
+                feature_builder=feature_builder,
+            )
+            ratios.append(result.loss_ratio if result.finite else math.inf)
+        score = sum(ratios) / len(ratios)
+        scores.append((scale, score))
+
+    best_scale, best_score = min(scores, key=lambda item: item[1])
+    if not math.isfinite(best_score):
+        raise ValueError("all scale candidates produced non-finite validation rollouts")
+    student.set_output_scale(best_scale)
+    return ScaleSelectionResult(best_scale, best_score, tuple(scores))
 
 
 @torch.no_grad()
