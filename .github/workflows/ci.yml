@@ -27,3 +27,5 @@ jobs:
         run: uv run --locked --extra cpu pytest -q
       - name: End-to-end smoke distillation
         run: uv run --locked --extra cpu python scripts/smoke_distill.py
+      - name: Teacher comparison smoke experiment
+        run: uv run --locked --extra cpu python scripts/compare_teachers.py --quick
