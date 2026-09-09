@@ -29,3 +29,5 @@ jobs:
         run: uv run --locked --extra cpu python scripts/smoke_distill.py
       - name: Teacher comparison smoke experiment
         run: uv run --locked --extra cpu python scripts/compare_teachers.py --quick
+      - name: Teacher condition probe
+        run: uv run --locked --extra cpu python scripts/probe_teacher_conditions.py
