@@ -21,6 +21,10 @@ class OptimizationTask(Protocol):
     def grad(self, parameter: Tensor) -> Tensor: ...
 
 
+class HessianVectorTask(OptimizationTask, Protocol):
+    def hessian_vector(self, vector: Tensor) -> Tensor: ...
+
+
 @dataclass(frozen=True, slots=True)
 class RolloutResult:
     """Loss trace and final parameter from an optimizer rollout."""
@@ -40,6 +44,18 @@ class RolloutResult:
     def loss_ratio(self) -> float:
         denominator = max(abs(self.initial_loss), 1e-12)
         return self.final_loss / denominator
+
+    @property
+    def normalized_aulc(self) -> float:
+        """Trapezoidal area under the loss curve normalized by the initial loss and horizon."""
+        if len(self.losses) <= 1:
+            return 1.0
+        denominator = max(abs(self.initial_loss), 1e-12)
+        area = sum(
+            0.5 * (left + right)
+            for left, right in zip(self.losses[:-1], self.losses[1:], strict=True)
+        )
+        return area / ((len(self.losses) - 1) * denominator)
 
     @property
     def finite(self) -> bool:
@@ -119,6 +135,52 @@ def rollout_teacher(
         grad = task.grad(parameter)
         update = teacher.step(parameter, grad).detach()
         parameter = parameter + update
+        losses.append(float(task.loss(parameter)))
+        if not torch.isfinite(parameter).all():
+            break
+
+    return RolloutResult(tuple(losses), parameter.detach().clone())
+
+
+@torch.no_grad()
+def rollout_exact_line_search_gradient(
+    initial_parameter: Tensor,
+    task: HessianVectorTask,
+    *,
+    steps: int,
+    eps: float = 1e-12,
+) -> RolloutResult:
+    """Steepest descent with the exact per-step line search for a quadratic objective.
+
+    For a quadratic with Hessian H and gradient g, the minimizing step along -g is
+
+        alpha = <g, g> / <g, H g>.
+
+    This is a deliberately strong gradient-only oracle: it removes learning-rate tuning as
+    an explanation for an optimizer's advantage while preserving the raw gradient direction.
+    """
+    if steps <= 0:
+        raise ValueError("steps must be positive")
+    if eps <= 0:
+        raise ValueError("eps must be positive")
+
+    parameter = initial_parameter.detach().clone()
+    losses = [float(task.loss(parameter))]
+    for _ in range(steps):
+        grad = task.grad(parameter)
+        grad_float = grad.float()
+        numerator = grad_float.square().sum()
+        if float(numerator) <= eps:
+            losses.append(float(task.loss(parameter)))
+            continue
+
+        h_grad = task.hessian_vector(grad).float()
+        denominator = (grad_float * h_grad).sum()
+        if not torch.isfinite(denominator) or float(denominator) <= eps:
+            break
+
+        alpha = numerator / denominator
+        parameter = parameter - grad * alpha.to(device=grad.device, dtype=grad.dtype)
         losses.append(float(task.loss(parameter)))
         if not torch.isfinite(parameter).all():
             break
