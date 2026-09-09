@@ -6,8 +6,8 @@ import math
 from collections.abc import Callable
 
 import torch
-
 from compare_teachers import make_coupled_quadratic, mean_and_std
+
 from optdistil.distill.rollout import rollout_teacher
 from optdistil.teachers.adamw import AdamWTeacher
 from optdistil.teachers.gradient_direction import GradientDirectionTeacher
