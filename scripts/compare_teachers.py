@@ -16,6 +16,7 @@ from optdistil.distill.features import (
 )
 from optdistil.distill.losses import DistillationLossWeights
 from optdistil.distill.rollout import (
+    OptimizationTask,
     collect_teacher_trajectory,
     evaluate_imitation,
     rollout_student,
@@ -24,12 +25,15 @@ from optdistil.distill.rollout import (
 )
 from optdistil.distill.train import calibrate_student_magnitude, train_student
 from optdistil.students.tiny_mlp import TinyMLPOptimizer
+from optdistil.tasks.coupled_quadratic import CoupledMatrixQuadraticTask
 from optdistil.tasks.quadratic import QuadraticTask
 from optdistil.teachers.adamw import AdamWTeacher
 from optdistil.teachers.gradient_direction import GradientDirectionTeacher
 from optdistil.teachers.muon import MuonTeacher
 
 TeacherFactory = Callable[[float], object]
+Case = tuple[torch.Tensor, OptimizationTask]
+TaskFactory = Callable[[int], Case]
 ADAMW_LR_CANDIDATES = (0.01, 0.03, 0.06, 0.1, 0.2)
 MUON_LR_CANDIDATES = (0.01, 0.03, 0.06, 0.1, 0.2, 0.3, 0.4, 0.6, 0.8)
 GRADIENT_DIRECTION_LR_CANDIDATES = (0.01, 0.03, 0.06, 0.1, 0.2, 0.3, 0.4, 0.6, 0.8)
@@ -97,8 +101,8 @@ class SeedSummary:
     all_finite: bool
 
 
-def make_quadratic(seed: int, *, size: int, device: torch.device) -> tuple[torch.Tensor, QuadraticTask]:
-    """Construct a reproducible matrix-shaped quadratic with mild anisotropy."""
+def make_quadratic(seed: int, *, size: int, device: torch.device) -> Case:
+    """Construct the original separable matrix-shaped quadratic smoke task."""
     generator = torch.Generator(device="cpu").manual_seed(seed)
     initial = torch.randn((size, size), generator=generator) * 0.6
     target = torch.randn((size, size), generator=generator) * 0.3
@@ -114,6 +118,54 @@ def make_quadratic(seed: int, *, size: int, device: torch.device) -> tuple[torch
     return initial, QuadraticTask(target, curvature)
 
 
+def random_spd_factor(
+    generator: torch.Generator,
+    *,
+    size: int,
+    hessian_condition: float,
+    device: torch.device,
+) -> torch.Tensor:
+    """Create a randomly rotated SPD factor contributing one quarter of log condition."""
+    if hessian_condition < 1.0:
+        raise ValueError("hessian_condition must be at least 1")
+
+    matrix = torch.randn((size, size), generator=generator)
+    q, _ = torch.linalg.qr(matrix)
+    factor_condition = hessian_condition**0.25
+    spectrum = torch.logspace(0.0, math.log10(factor_condition), size)
+    factor = q @ torch.diag(spectrum) @ q.mT
+    return factor.to(device)
+
+
+def make_coupled_quadratic(
+    seed: int,
+    *,
+    size: int,
+    condition: float,
+    device: torch.device,
+) -> Case:
+    """Construct a dense row/column-coupled quadratic with controlled conditioning."""
+    generator = torch.Generator(device="cpu").manual_seed(seed)
+    initial = torch.randn((size, size), generator=generator) * 0.6
+    target = torch.randn((size, size), generator=generator) * 0.3
+    left = random_spd_factor(
+        generator,
+        size=size,
+        hessian_condition=condition,
+        device=device,
+    )
+    right = random_spd_factor(
+        generator,
+        size=size,
+        hessian_condition=condition,
+        device=device,
+    )
+    return (
+        initial.to(device),
+        CoupledMatrixQuadraticTask(target.to(device), left, right),
+    )
+
+
 def mean_and_std(values: list[float]) -> tuple[float, float]:
     if not values:
         raise ValueError("at least one value is required")
@@ -122,12 +174,12 @@ def mean_and_std(values: list[float]) -> tuple[float, float]:
 
 def select_teacher_lr(
     teacher_factory: TeacherFactory,
-    validation_cases: list[tuple[torch.Tensor, QuadraticTask]],
+    validation_cases: list[Case],
     *,
     candidates: tuple[float, ...],
     steps: int,
 ) -> tuple[float, float]:
-    """Tune teacher learning rate on the validation task distribution."""
+    """Tune teacher learning rate on a teacher-only validation distribution."""
     if not candidates:
         raise ValueError("at least one teacher learning-rate candidate is required")
 
@@ -152,7 +204,7 @@ def select_teacher_lr(
 
 def evaluate_student_rollouts(
     student: TinyMLPOptimizer,
-    test_cases: list[tuple[torch.Tensor, QuadraticTask]],
+    test_cases: list[Case],
     *,
     steps: int,
     feature_builder: FeatureBuilder,
@@ -187,18 +239,18 @@ def run_one_teacher(
     feature_builder: FeatureBuilder,
     objective_name: str,
     objective_weights: DistillationLossWeights,
-    validation_cases: list[tuple[torch.Tensor, QuadraticTask]],
-    test_cases: list[tuple[torch.Tensor, QuadraticTask]],
+    student_validation_cases: list[Case],
+    test_cases: list[Case],
+    task_factory: TaskFactory,
     train_tasks: int,
     steps: int,
     epochs: int,
-    size: int,
     student_seed: int,
     device: torch.device,
 ) -> ComparisonResult:
     train_records = []
     for task_index in range(train_tasks):
-        initial, task = make_quadratic(1000 + task_index, size=size, device=device)
+        initial, task = task_factory(1000 + task_index)
         records, _ = collect_teacher_trajectory(
             initial,
             task,
@@ -272,7 +324,7 @@ def run_one_teacher(
     student.set_output_scale(1.0)
     scale_selection = select_student_output_scale(
         student,
-        validation_cases,
+        student_validation_cases,
         candidates=STUDENT_SCALE_CANDIDATES,
         steps=steps,
         feature_builder=feature_builder,
@@ -383,6 +435,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--steps", type=int, default=24)
     parser.add_argument("--epochs", type=int, default=60)
     parser.add_argument("--size", type=int, default=8)
+    parser.add_argument("--condition", type=float, default=100.0)
+    parser.add_argument(
+        "--task-family",
+        choices=("elementwise", "coupled"),
+        default="coupled",
+    )
     parser.add_argument("--student-seed", type=int, default=1234, help="First student seed.")
     parser.add_argument("--student-seeds", type=int, default=5, help="Number of student seeds.")
     parser.add_argument("--device", default="cpu")
@@ -404,6 +462,8 @@ def main() -> None:
         args.epochs = 10
         args.size = 6
         args.student_seeds = 3
+        if args.task_family == "coupled":
+            args.condition = 30.0
 
     if min(
         args.train_tasks,
@@ -414,16 +474,28 @@ def main() -> None:
         args.student_seeds,
     ) <= 0:
         raise ValueError("task counts, steps, epochs, and student seeds must all be positive")
+    if args.condition < 1.0:
+        raise ValueError("condition must be at least 1")
 
     device = torch.device(args.device)
-    validation_cases = [
-        make_quadratic(8001 + task_index, size=args.size, device=device)
-        for task_index in range(args.validation_tasks)
+    if args.task_family == "coupled":
+        task_factory: TaskFactory = lambda seed: make_coupled_quadratic(
+            seed,
+            size=args.size,
+            condition=args.condition,
+            device=device,
+        )
+    else:
+        task_factory = lambda seed: make_quadratic(seed, size=args.size, device=device)
+
+    teacher_validation_cases = [
+        task_factory(7001 + task_index) for task_index in range(args.validation_tasks)
     ]
-    test_cases = [
-        make_quadratic(9001 + task_index, size=args.size, device=device)
-        for task_index in range(args.test_tasks)
+    student_validation_cases = [
+        task_factory(8001 + task_index) for task_index in range(args.validation_tasks)
     ]
+    test_cases = [task_factory(9001 + task_index) for task_index in range(args.test_tasks)]
+
     teacher_specs: tuple[tuple[str, TeacherFactory, tuple[float, ...]], ...] = (
         (
             "adamw",
@@ -448,7 +520,7 @@ def main() -> None:
             lr_candidates,
             *select_teacher_lr(
                 factory,
-                validation_cases,
+                teacher_validation_cases,
                 candidates=lr_candidates,
                 steps=args.steps,
             ),
@@ -472,12 +544,12 @@ def main() -> None:
             feature_builder=feature_builder,
             objective_name=objective_name,
             objective_weights=objective_weights,
-            validation_cases=validation_cases,
+            student_validation_cases=student_validation_cases,
             test_cases=test_cases,
+            task_factory=task_factory,
             train_tasks=args.train_tasks,
             steps=args.steps,
             epochs=args.epochs,
-            size=args.size,
             student_seed=student_seed,
             device=device,
         )
@@ -495,9 +567,12 @@ def main() -> None:
     summaries = summarize_seed_results(results)
 
     payload = {
-        "experiment": "teacher_information_baseline_multi_seed",
+        "experiment": "coupled_teacher_information_multi_seed",
+        "task_family": args.task_family,
+        "condition": args.condition if args.task_family == "coupled" else None,
         "train_tasks": args.train_tasks,
-        "validation_tasks": args.validation_tasks,
+        "teacher_validation_tasks": args.validation_tasks,
+        "student_validation_tasks": args.validation_tasks,
         "test_tasks": args.test_tasks,
         "teacher_lr_candidates": {
             "adamw": ADAMW_LR_CANDIDATES,
