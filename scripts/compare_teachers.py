@@ -17,7 +17,7 @@ from optdistil.distill.rollout import (
     evaluate_imitation,
     rollout_student,
 )
-from optdistil.distill.train import train_student
+from optdistil.distill.train import calibrate_student_magnitude, train_student
 from optdistil.students.tiny_mlp import TinyMLPOptimizer
 from optdistil.tasks.quadratic import QuadraticTask
 from optdistil.teachers.adamw import AdamWTeacher
@@ -33,6 +33,12 @@ class ComparisonResult:
     student_parameters: int
     train_records: int
     train_distillation_loss: float
+    calibration_scale: float
+    heldout_imitation_loss_uncalibrated: float
+    heldout_direction_loss_uncalibrated: float
+    heldout_magnitude_loss_uncalibrated: float
+    student_loss_ratio_uncalibrated: float
+    student_final_loss_uncalibrated: float
     heldout_imitation_loss: float
     heldout_direction_loss: float
     heldout_magnitude_loss: float
@@ -98,6 +104,17 @@ def run_one_teacher(
         teacher_name=name,
         feature_builder=feature_builder,
     )
+
+    imitation_uncalibrated = evaluate_imitation(student, heldout_records)
+    student_rollout_uncalibrated = rollout_student(
+        student,
+        heldout_initial,
+        heldout_task,
+        steps=steps,
+        feature_builder=feature_builder,
+    )
+
+    calibration_scale = calibrate_student_magnitude(student, train_records)
     imitation = evaluate_imitation(student, heldout_records)
     student_rollout = rollout_student(
         student,
@@ -113,6 +130,12 @@ def run_one_teacher(
         student_parameters=student.parameter_count,
         train_records=len(train_records),
         train_distillation_loss=history[-1],
+        calibration_scale=calibration_scale,
+        heldout_imitation_loss_uncalibrated=imitation_uncalibrated["total"],
+        heldout_direction_loss_uncalibrated=imitation_uncalibrated["direction"],
+        heldout_magnitude_loss_uncalibrated=imitation_uncalibrated["magnitude"],
+        student_loss_ratio_uncalibrated=student_rollout_uncalibrated.loss_ratio,
+        student_final_loss_uncalibrated=student_rollout_uncalibrated.final_loss,
         heldout_imitation_loss=imitation["total"],
         heldout_direction_loss=imitation["direction"],
         heldout_magnitude_loss=imitation["magnitude"],
