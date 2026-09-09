@@ -4,7 +4,11 @@ import pytest
 import torch
 from torch import nn
 
-from optdistil.distill.alignment import flattened_cosine, probe_same_state_alignment
+from optdistil.distill.alignment import (
+    flattened_cosine,
+    probe_reference_gradient_geometry,
+    probe_same_state_alignment,
+)
 from optdistil.tasks.quadratic import QuadraticTask
 
 
@@ -23,6 +27,19 @@ class ScaledGradientReference:
         return -self.scale * grad
 
 
+class OrthogonalGradientReference:
+    @torch.no_grad()
+    def step(self, parameter: torch.Tensor, grad: torch.Tensor) -> torch.Tensor:
+        del parameter
+        flat = grad.reshape(-1)
+        if flat.numel() % 2:
+            raise ValueError("test reference requires an even number of parameters")
+        rotated = torch.empty_like(flat)
+        rotated[0::2] = -flat[1::2]
+        rotated[1::2] = flat[0::2]
+        return rotated.reshape_as(grad)
+
+
 def test_flattened_cosine_handles_basic_directions() -> None:
     x = torch.tensor([[1.0, 0.0]])
     same = torch.tensor([[2.0, 0.0]])
@@ -33,6 +50,37 @@ def test_flattened_cosine_handles_basic_directions() -> None:
     assert flattened_cosine(x, opposite) == pytest.approx(-1.0)
     assert flattened_cosine(x, orthogonal) == pytest.approx(0.0)
     assert flattened_cosine(x, torch.zeros_like(x)) == pytest.approx(0.0)
+
+
+def test_reference_gradient_geometry_detects_matching_direction() -> None:
+    initial = torch.tensor([[1.0, -2.0], [0.5, 3.0]])
+    task = QuadraticTask(torch.zeros_like(initial))
+
+    result = probe_reference_gradient_geometry(
+        initial,
+        task,
+        reference=ScaledGradientReference(scale=0.25),
+        steps=1,
+    )
+
+    assert result.cosine_mean == pytest.approx(1.0)
+    assert result.disagreement_mean == pytest.approx(0.0)
+    assert result.rollout.finite
+
+
+def test_reference_gradient_geometry_detects_orthogonal_direction() -> None:
+    initial = torch.tensor([[1.0, -2.0], [0.5, 3.0]])
+    task = QuadraticTask(torch.zeros_like(initial))
+
+    result = probe_reference_gradient_geometry(
+        initial,
+        task,
+        reference=OrthogonalGradientReference(),
+        steps=1,
+    )
+
+    assert result.cosine_mean == pytest.approx(0.0, abs=1e-7)
+    assert result.disagreement_mean == pytest.approx(1.0, abs=1e-7)
 
 
 def test_same_state_alignment_matches_gradient_reference() -> None:
