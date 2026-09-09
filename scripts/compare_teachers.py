@@ -45,6 +45,7 @@ class ComparisonResult:
     teacher_validation_loss_ratio: float
     feature_set: str
     objective: str
+    student_seed: int
     student_parameters: int
     train_records: int
     train_distillation_loss: float
@@ -70,6 +71,27 @@ class ComparisonResult:
     student_loss_ratio_std: float
     student_final_loss: float
     student_finite: bool
+
+
+@dataclass(frozen=True, slots=True)
+class SeedSummary:
+    teacher: str
+    teacher_lr: float
+    teacher_lr_at_boundary: bool
+    feature_set: str
+    objective: str
+    student_seeds: int
+    teacher_loss_ratio: float
+    teacher_loss_ratio_std: float
+    student_loss_ratio_mean: float
+    student_loss_ratio_seed_std: float
+    student_loss_ratio_best: float
+    student_loss_ratio_worst: float
+    student_task_std_mean: float
+    heldout_direction_loss_mean: float
+    validation_scale_mean: float
+    validation_scale_boundary_fraction: float
+    all_finite: bool
 
 
 def make_quadratic(seed: int, *, size: int, device: torch.device) -> tuple[torch.Tensor, QuadraticTask]:
@@ -268,6 +290,7 @@ def run_one_teacher(
         teacher_validation_loss_ratio=teacher_validation_loss_ratio,
         feature_set=feature_set,
         objective=objective_name,
+        student_seed=student_seed,
         student_parameters=student.parameter_count,
         train_records=len(train_records),
         train_distillation_loss=history[-1],
@@ -299,6 +322,49 @@ def run_one_teacher(
     )
 
 
+def summarize_seed_results(results: list[ComparisonResult]) -> list[SeedSummary]:
+    groups: dict[tuple[str, str, str], list[ComparisonResult]] = {}
+    for result in results:
+        key = (result.teacher, result.feature_set, result.objective)
+        groups.setdefault(key, []).append(result)
+
+    summaries = []
+    for group in groups.values():
+        seed_ratios = [result.student_loss_ratio for result in group]
+        ratio_mean, ratio_seed_std = mean_and_std(seed_ratios)
+        first = group[0]
+        summaries.append(
+            SeedSummary(
+                teacher=first.teacher,
+                teacher_lr=first.teacher_lr,
+                teacher_lr_at_boundary=first.teacher_lr_at_boundary,
+                feature_set=first.feature_set,
+                objective=first.objective,
+                student_seeds=len(group),
+                teacher_loss_ratio=first.teacher_loss_ratio,
+                teacher_loss_ratio_std=first.teacher_loss_ratio_std,
+                student_loss_ratio_mean=ratio_mean,
+                student_loss_ratio_seed_std=ratio_seed_std,
+                student_loss_ratio_best=min(seed_ratios),
+                student_loss_ratio_worst=max(seed_ratios),
+                student_task_std_mean=statistics.fmean(
+                    result.student_loss_ratio_std for result in group
+                ),
+                heldout_direction_loss_mean=statistics.fmean(
+                    result.heldout_direction_loss for result in group
+                ),
+                validation_scale_mean=statistics.fmean(
+                    result.validation_scale for result in group
+                ),
+                validation_scale_boundary_fraction=statistics.fmean(
+                    float(result.validation_scale_at_boundary) for result in group
+                ),
+                all_finite=all(result.student_finite for result in group),
+            )
+        )
+    return summaries
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Compare tiny students distilled from tuned AdamW and Muon teachers."
@@ -309,7 +375,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--steps", type=int, default=24)
     parser.add_argument("--epochs", type=int, default=60)
     parser.add_argument("--size", type=int, default=8)
-    parser.add_argument("--student-seed", type=int, default=1234)
+    parser.add_argument("--student-seed", type=int, default=1234, help="First student seed.")
+    parser.add_argument("--student-seeds", type=int, default=5, help="Number of student seeds.")
     parser.add_argument("--device", default="cpu")
     parser.add_argument(
         "--quick",
@@ -328,9 +395,17 @@ def main() -> None:
         args.steps = 8
         args.epochs = 10
         args.size = 6
+        args.student_seeds = 3
 
-    if min(args.train_tasks, args.validation_tasks, args.test_tasks, args.steps, args.epochs) <= 0:
-        raise ValueError("task counts, steps, and epochs must all be positive")
+    if min(
+        args.train_tasks,
+        args.validation_tasks,
+        args.test_tasks,
+        args.steps,
+        args.epochs,
+        args.student_seeds,
+    ) <= 0:
+        raise ValueError("task counts, steps, epochs, and student seeds must all be positive")
 
     device = torch.device(args.device)
     validation_cases = [
@@ -359,6 +434,7 @@ def main() -> None:
         ("elementwise", build_elementwise_features),
         ("matrix_aware", build_matrix_aware_features),
     )
+    student_seeds = [args.student_seed + offset for offset in range(args.student_seeds)]
 
     results = [
         run_one_teacher(
@@ -376,26 +452,31 @@ def main() -> None:
             steps=args.steps,
             epochs=args.epochs,
             size=args.size,
-            student_seed=args.student_seed,
+            student_seed=student_seed,
             device=device,
         )
         for teacher_name, factory, teacher_lr, teacher_validation_loss_ratio in tuned_teachers
         for feature_name, feature_builder in feature_sets
         for objective_name, objective_weights in OBJECTIVES
+        for student_seed in student_seeds
     ]
+    summaries = summarize_seed_results(results)
 
     payload = {
-        "experiment": "objective_ablation_multi_test",
+        "experiment": "multi_seed_objective_ablation",
         "train_tasks": args.train_tasks,
         "validation_tasks": args.validation_tasks,
         "test_tasks": args.test_tasks,
         "teacher_lr_candidates": TEACHER_LR_CANDIDATES,
         "student_scale_candidates": STUDENT_SCALE_CANDIDATES,
         "objectives": [name for name, _ in OBJECTIVES],
+        "student_seed_base": args.student_seed,
+        "student_seeds": args.student_seeds,
         "steps": args.steps,
         "epochs": args.epochs,
         "size": args.size,
         "device": str(device),
+        "summaries": [asdict(summary) for summary in summaries],
         "results": [asdict(result) for result in results],
     }
     print(json.dumps(payload, indent=2, sort_keys=True))
