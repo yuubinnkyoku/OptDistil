@@ -16,6 +16,7 @@ from optdistil.distill.rollout import (
     collect_teacher_trajectory,
     evaluate_imitation,
     rollout_student,
+    select_student_output_scale,
 )
 from optdistil.distill.train import calibrate_student_magnitude, train_student
 from optdistil.students.tiny_mlp import TinyMLPOptimizer
@@ -24,6 +25,7 @@ from optdistil.teachers.adamw import AdamWTeacher
 from optdistil.teachers.muon import MuonTeacher
 
 TeacherFactory = Callable[[], object]
+SCALE_CANDIDATES = (0.25, 0.5, 0.75, 1.0, 1.5, 2.0)
 
 
 @dataclass(frozen=True, slots=True)
@@ -33,7 +35,11 @@ class ComparisonResult:
     student_parameters: int
     train_records: int
     train_distillation_loss: float
-    calibration_scale: float
+    teacher_magnitude_scale: float
+    teacher_calibrated_magnitude_loss: float
+    teacher_calibrated_student_loss_ratio: float
+    validation_scale: float
+    validation_loss_ratio: float
     heldout_imitation_loss_uncalibrated: float
     heldout_direction_loss_uncalibrated: float
     heldout_magnitude_loss_uncalibrated: float
@@ -72,6 +78,7 @@ def run_one_teacher(
     feature_set: str,
     feature_builder: FeatureBuilder,
     train_tasks: int,
+    validation_tasks: int,
     steps: int,
     epochs: int,
     size: int,
@@ -114,7 +121,29 @@ def run_one_teacher(
         feature_builder=feature_builder,
     )
 
-    calibration_scale = calibrate_student_magnitude(student, train_records)
+    teacher_magnitude_scale = calibrate_student_magnitude(student, train_records)
+    teacher_calibrated_imitation = evaluate_imitation(student, heldout_records)
+    teacher_calibrated_rollout = rollout_student(
+        student,
+        heldout_initial,
+        heldout_task,
+        steps=steps,
+        feature_builder=feature_builder,
+    )
+
+    student.set_output_scale(1.0)
+    validation_cases = [
+        make_quadratic(8001 + task_index, size=size, device=device)
+        for task_index in range(validation_tasks)
+    ]
+    scale_selection = select_student_output_scale(
+        student,
+        validation_cases,
+        candidates=SCALE_CANDIDATES,
+        steps=steps,
+        feature_builder=feature_builder,
+    )
+
     imitation = evaluate_imitation(student, heldout_records)
     student_rollout = rollout_student(
         student,
@@ -130,7 +159,11 @@ def run_one_teacher(
         student_parameters=student.parameter_count,
         train_records=len(train_records),
         train_distillation_loss=history[-1],
-        calibration_scale=calibration_scale,
+        teacher_magnitude_scale=teacher_magnitude_scale,
+        teacher_calibrated_magnitude_loss=teacher_calibrated_imitation["magnitude"],
+        teacher_calibrated_student_loss_ratio=teacher_calibrated_rollout.loss_ratio,
+        validation_scale=scale_selection.scale,
+        validation_loss_ratio=scale_selection.validation_loss_ratio,
         heldout_imitation_loss_uncalibrated=imitation_uncalibrated["total"],
         heldout_direction_loss_uncalibrated=imitation_uncalibrated["direction"],
         heldout_magnitude_loss_uncalibrated=imitation_uncalibrated["magnitude"],
@@ -151,6 +184,7 @@ def parse_args() -> argparse.Namespace:
         description="Compare tiny students distilled from AdamW and Muon teachers."
     )
     parser.add_argument("--train-tasks", type=int, default=4)
+    parser.add_argument("--validation-tasks", type=int, default=2)
     parser.add_argument("--steps", type=int, default=24)
     parser.add_argument("--epochs", type=int, default=60)
     parser.add_argument("--size", type=int, default=8)
@@ -168,6 +202,7 @@ def main() -> None:
     args = parse_args()
     if args.quick:
         args.train_tasks = 2
+        args.validation_tasks = 2
         args.steps = 8
         args.epochs = 10
         args.size = 6
@@ -195,6 +230,7 @@ def main() -> None:
             feature_set=feature_name,
             feature_builder=feature_builder,
             train_tasks=args.train_tasks,
+            validation_tasks=args.validation_tasks,
             steps=args.steps,
             epochs=args.epochs,
             size=args.size,
@@ -206,8 +242,10 @@ def main() -> None:
     ]
 
     payload = {
-        "experiment": "teacher_feature_comparison",
+        "experiment": "teacher_feature_scale_comparison",
         "train_tasks": args.train_tasks,
+        "validation_tasks": args.validation_tasks,
+        "scale_candidates": SCALE_CANDIDATES,
         "steps": args.steps,
         "epochs": args.epochs,
         "size": args.size,
