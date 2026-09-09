@@ -15,7 +15,7 @@ def train_student(
     *,
     epochs: int = 100,
     lr: float = 1e-3,
-    weights: DistillationLossWeights = DistillationLossWeights(),
+    weights: DistillationLossWeights | None = None,
 ) -> list[float]:
     """Distill a student on a small in-memory trajectory collection.
 
