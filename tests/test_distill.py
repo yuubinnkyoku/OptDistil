@@ -5,6 +5,7 @@ import torch
 from optdistil.distill.collect import collect_teacher_step
 from optdistil.distill.features import build_matrix_aware_features
 from optdistil.distill.losses import direction_loss, magnitude_loss
+from optdistil.distill.train import calibrate_student_magnitude, magnitude_calibration_scale
 from optdistil.distill.trajectory import TrajectoryDataset, TrajectoryRecord
 from optdistil.students.tiny_mlp import StudentState, TinyMLPOptimizer
 from optdistil.teachers.adamw import AdamWTeacher
@@ -22,6 +23,22 @@ def test_tiny_student_preserves_element_count() -> None:
     update = student(features)
     assert update.shape == (32,)
     assert student.parameter_count == 153
+
+
+def test_global_magnitude_calibration_does_not_add_parameters() -> None:
+    torch.manual_seed(5)
+    student = TinyMLPOptimizer()
+    features = torch.randn(32, 8)
+    predicted = student(features).detach()
+    record = TrajectoryRecord(features, predicted * 3.0)
+
+    scale = magnitude_calibration_scale(student, [record])
+    assert abs(scale - 3.0) < 1e-5
+
+    applied = calibrate_student_magnitude(student, [record])
+    assert abs(applied - 3.0) < 1e-5
+    assert student.parameter_count == 153
+    torch.testing.assert_close(student(features), record.teacher_update, rtol=1e-5, atol=1e-6)
 
 
 def test_matrix_features_keep_student_input_dimension_fixed() -> None:
