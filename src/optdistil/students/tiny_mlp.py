@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import math
+
 import torch
 from torch import Tensor, nn
 
@@ -25,11 +27,19 @@ class TinyMLPOptimizer(nn.Module):
             in_dim = hidden_dim
         layers.append(nn.Linear(in_dim, 1))
         self.network = nn.Sequential(*layers)
+        self.register_buffer("output_scale", torch.tensor(1.0))
 
     def forward(self, features: Tensor) -> Tensor:
         if features.ndim != 2:
             raise ValueError("features must have shape [numel, feature_dim]")
-        return self.network(features).squeeze(-1)
+        return self.network(features).squeeze(-1) * self.output_scale
+
+    @torch.no_grad()
+    def set_output_scale(self, scale: float) -> None:
+        """Set a positive non-trainable global multiplier for predicted updates."""
+        if not math.isfinite(scale) or scale <= 0.0:
+            raise ValueError("output scale must be positive and finite")
+        self.output_scale.fill_(scale)
 
     @property
     def parameter_count(self) -> int:
