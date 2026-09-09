@@ -35,3 +35,5 @@ jobs:
         run: uv run --locked --extra cpu python scripts/probe_student_teacher_mechanisms.py
       - name: Same-state student Muon alignment probe
         run: uv run --locked --extra cpu python scripts/probe_same_state_alignment.py
+      - name: Muon-gradient disagreement-selected probe
+        run: uv run --locked --extra cpu python scripts/probe_muon_disagreement_tasks.py
