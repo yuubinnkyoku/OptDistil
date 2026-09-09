@@ -3,6 +3,7 @@ from pathlib import Path
 import torch
 
 from optdistil.distill.collect import collect_teacher_step
+from optdistil.distill.features import build_matrix_aware_features
 from optdistil.distill.losses import direction_loss, magnitude_loss
 from optdistil.distill.trajectory import TrajectoryDataset, TrajectoryRecord
 from optdistil.students.tiny_mlp import StudentState, TinyMLPOptimizer
@@ -21,6 +22,28 @@ def test_tiny_student_preserves_element_count() -> None:
     update = student(features)
     assert update.shape == (32,)
     assert student.parameter_count == 153
+
+
+def test_matrix_features_keep_student_input_dimension_fixed() -> None:
+    parameter = torch.randn(4, 6)
+    grad = torch.randn_like(parameter)
+    momentum = torch.randn_like(parameter)
+    second_moment = torch.rand_like(parameter)
+
+    features = build_matrix_aware_features(
+        parameter,
+        grad,
+        momentum,
+        second_moment,
+        step=2,
+        total_steps=10,
+    )
+
+    assert features.shape == (24, 8)
+    row_rms = grad.square().mean(dim=1, keepdim=True).add(1e-8).sqrt().expand_as(grad)
+    col_rms = grad.square().mean(dim=0, keepdim=True).add(1e-8).sqrt().expand_as(grad)
+    torch.testing.assert_close(features[:, 4], row_rms.reshape(-1))
+    torch.testing.assert_close(features[:, 5], col_rms.reshape(-1))
 
 
 def test_collect_teacher_step_uses_teacher_independent_features() -> None:
