@@ -7,6 +7,11 @@ from dataclasses import asdict, dataclass
 
 import torch
 
+from optdistil.distill.features import (
+    FeatureBuilder,
+    build_elementwise_features,
+    build_matrix_aware_features,
+)
 from optdistil.distill.rollout import (
     collect_teacher_trajectory,
     evaluate_imitation,
@@ -24,6 +29,7 @@ TeacherFactory = Callable[[], object]
 @dataclass(frozen=True, slots=True)
 class ComparisonResult:
     teacher: str
+    feature_set: str
     student_parameters: int
     train_records: int
     train_distillation_loss: float
@@ -57,6 +63,8 @@ def run_one_teacher(
     name: str,
     teacher_factory: TeacherFactory,
     *,
+    feature_set: str,
+    feature_builder: FeatureBuilder,
     train_tasks: int,
     steps: int,
     epochs: int,
@@ -73,6 +81,7 @@ def run_one_teacher(
             teacher=teacher_factory(),
             steps=steps,
             teacher_name=name,
+            feature_builder=feature_builder,
         )
         train_records.extend(records)
 
@@ -87,12 +96,20 @@ def run_one_teacher(
         teacher=teacher_factory(),
         steps=steps,
         teacher_name=name,
+        feature_builder=feature_builder,
     )
     imitation = evaluate_imitation(student, heldout_records)
-    student_rollout = rollout_student(student, heldout_initial, heldout_task, steps=steps)
+    student_rollout = rollout_student(
+        student,
+        heldout_initial,
+        heldout_task,
+        steps=steps,
+        feature_builder=feature_builder,
+    )
 
     return ComparisonResult(
         teacher=name,
+        feature_set=feature_set,
         student_parameters=student.parameter_count,
         train_records=len(train_records),
         train_distillation_loss=history[-1],
@@ -133,7 +150,7 @@ def main() -> None:
         args.size = 6
 
     device = torch.device(args.device)
-    factories: tuple[tuple[str, TeacherFactory], ...] = (
+    teachers: tuple[tuple[str, TeacherFactory], ...] = (
         (
             "adamw",
             lambda: AdamWTeacher(lr=0.03, betas=(0.9, 0.99)),
@@ -143,11 +160,17 @@ def main() -> None:
             lambda: MuonTeacher(lr=0.03, momentum=0.95, ns_steps=5),
         ),
     )
+    feature_sets: tuple[tuple[str, FeatureBuilder], ...] = (
+        ("elementwise", build_elementwise_features),
+        ("matrix_aware", build_matrix_aware_features),
+    )
 
     results = [
         run_one_teacher(
-            name,
+            teacher_name,
             factory,
+            feature_set=feature_name,
+            feature_builder=feature_builder,
             train_tasks=args.train_tasks,
             steps=args.steps,
             epochs=args.epochs,
@@ -155,11 +178,12 @@ def main() -> None:
             student_seed=args.student_seed,
             device=device,
         )
-        for name, factory in factories
+        for teacher_name, factory in teachers
+        for feature_name, feature_builder in feature_sets
     ]
 
     payload = {
-        "experiment": "teacher_comparison",
+        "experiment": "teacher_feature_comparison",
         "train_tasks": args.train_tasks,
         "steps": args.steps,
         "epochs": args.epochs,
