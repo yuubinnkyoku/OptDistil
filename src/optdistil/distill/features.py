@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from torch import Tensor, full_like, stack
+import torch
 
 
 FEATURE_NAMES = (
@@ -16,15 +16,15 @@ FEATURE_NAMES = (
 
 
 def build_elementwise_features(
-    parameter: Tensor,
-    grad: Tensor,
-    momentum: Tensor,
-    second_moment: Tensor,
+    parameter: torch.Tensor,
+    grad: torch.Tensor,
+    momentum: torch.Tensor,
+    second_moment: torch.Tensor,
     *,
     step: int,
     total_steps: int,
     eps: float = 1e-8,
-) -> Tensor:
+) -> torch.Tensor:
     """Build the initial teacher-independent feature set used by tiny students.
 
     The returned tensor is flattened across parameters and has shape ``[numel, 8]``.
@@ -47,11 +47,11 @@ def build_elementwise_features(
     parameter_rms = parameter.square().mean().add(eps).sqrt()
     progress = min(max(step / total_steps, 0.0), 1.0)
 
-    def flat(tensor: Tensor) -> Tensor:
+    def flat(tensor: torch.Tensor) -> torch.Tensor:
         return tensor.reshape(-1)
 
     flat_grad = flat(grad)
-    return stack(
+    return torch.stack(
         (
             flat_grad,
             flat(momentum),
@@ -60,7 +60,7 @@ def build_elementwise_features(
             flat(grad.sign()),
             flat(grad.abs().log1p()),
             parameter_rms.expand_as(flat_grad),
-            full_like(flat_grad, progress),
+            torch.full_like(flat_grad, progress),
         ),
         dim=-1,
     )
