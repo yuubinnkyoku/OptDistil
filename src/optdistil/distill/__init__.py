@@ -19,6 +19,7 @@ from optdistil.distill.rollout import (
     collect_teacher_trajectory,
     evaluate_imitation,
     rollout_student,
+    rollout_teacher,
     select_student_output_scale,
 )
 from optdistil.distill.train import (
@@ -47,6 +48,7 @@ __all__ = [
     "magnitude_calibration_scale",
     "magnitude_loss",
     "rollout_student",
+    "rollout_teacher",
     "select_student_output_scale",
     "train_student",
 ]
