@@ -59,6 +59,22 @@ class SameStateAlignmentResult:
         return _mean(step.student_reference_norm_ratio for step in self.steps)
 
 
+@dataclass(frozen=True, slots=True)
+class ReferenceGradientGeometryResult:
+    """How strongly a reference optimizer direction differs from steepest descent."""
+
+    cosines: tuple[float, ...]
+    rollout: RolloutResult
+
+    @property
+    def cosine_mean(self) -> float:
+        return _mean(self.cosines)
+
+    @property
+    def disagreement_mean(self) -> float:
+        return 1.0 - self.cosine_mean
+
+
 def _mean(values) -> float:
     values = list(values)
     if not values:
@@ -80,6 +96,42 @@ def flattened_cosine(left: Tensor, right: Tensor, *, eps: float = 1e-12) -> floa
         return 0.0
     cosine = (left_flat @ right_flat) / denominator
     return float(cosine.clamp(-1.0, 1.0))
+
+
+@torch.no_grad()
+def probe_reference_gradient_geometry(
+    initial_parameter: Tensor,
+    task: OptimizationTask,
+    *,
+    reference: TeacherOptimizer,
+    steps: int,
+    eps: float = 1e-12,
+) -> ReferenceGradientGeometryResult:
+    """Measure reference-vs--gradient disagreement along the reference trajectory."""
+    if steps <= 0:
+        raise ValueError("steps must be positive")
+    if eps <= 0.0:
+        raise ValueError("eps must be positive")
+
+    parameter = initial_parameter.detach().clone()
+    losses = [float(task.loss(parameter))]
+    cosines: list[float] = []
+
+    for _ in range(steps):
+        grad = task.grad(parameter)
+        reference_update = reference.step(parameter, grad).detach().reshape_as(parameter)
+        if not (torch.isfinite(reference_update).all() and torch.isfinite(grad).all()):
+            break
+        cosines.append(flattened_cosine(reference_update, -grad, eps=eps))
+        parameter = parameter + reference_update
+        losses.append(float(task.loss(parameter)))
+        if not torch.isfinite(parameter).all():
+            break
+
+    return ReferenceGradientGeometryResult(
+        cosines=tuple(cosines),
+        rollout=RolloutResult(tuple(losses), parameter.detach().clone()),
+    )
 
 
 @torch.no_grad()
