@@ -14,6 +14,33 @@ The project is designed around three stages:
 2. **Optimizer distillation** — train a tiny student optimizer to imitate useful aspects of the teacher update rule.
 3. **Student evaluation / meta-finetuning** — evaluate the distilled optimizer independently and optionally optimize it further against downstream training loss.
 
+## Current milestone
+
+The first end-to-end path is implemented:
+
+- functional AdamW teacher;
+- reference Muon teacher with Newton-Schulz orthogonalization;
+- teacher-independent trajectory features;
+- serializable trajectory records/datasets;
+- a Celo2-base-like `8 -> 8 -> 8 -> 1` student (153 parameters);
+- direction + magnitude distillation losses;
+- a deterministic quadratic smoke task;
+- CI covering lint, unit tests, and end-to-end smoke distillation.
+
+The current student observation is deliberately small and teacher-independent:
+
+`gradient, momentum, RMS, parameter, gradient sign, log|gradient|, parameter RMS, training progress`.
+
+This makes teacher-size scaling experiments meaningful: a larger teacher is not allowed to secretly give the student more information.
+
+## Quick start
+
+```bash
+python -m pip install -e ".[dev]"
+pytest -q
+python scripts/smoke_distill.py
+```
+
 ## Initial scope
 
 - Teachers: AdamW, Muon, heavier matrix optimizers, and eventually large learned optimizers.
@@ -27,16 +54,20 @@ The project is designed around three stages:
 OptDistil/
 ├── configs/              # experiment configuration examples and conventions
 ├── docs/                 # design notes and research decisions
-├── scripts/              # entry points for data generation, distillation, evaluation
+├── scripts/              # runnable experiments and data-generation entry points
 ├── src/optdistil/
 │   ├── teachers/         # teacher optimizer adapters
 │   ├── students/         # tiny learned optimizer architectures
-│   ├── distill/          # trajectory datasets and distillation objectives
-│   ├── tasks/            # inner-loop training tasks
+│   ├── distill/          # features, trajectories, objectives, training
+│   ├── tasks/            # cheap inner-loop tasks
 │   └── metrics/          # optimizer/evaluation metrics
 └── tests/                # lightweight correctness tests
 ```
 
-## Status
+## Next experiments
 
-Early research scaffold. The first milestone is a minimal teacher → trajectory → student pipeline on a tiny model before adding expensive teachers or device-specific backends.
+1. Compare direct training of the 153-parameter student against teacher-distilled initialization.
+2. Sweep teacher capacity while keeping the student architecture and observations fixed.
+3. Add Muon-generated trajectories and compare single-teacher vs. mixed-teacher distillation.
+4. Add rollout loss and downstream meta-finetuning.
+5. Introduce NPU-native student observations and measure loss per wall-clock time / joule.
