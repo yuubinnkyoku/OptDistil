@@ -19,6 +19,11 @@ from optdistil.distill.rollout import (
     evaluate_imitation,
     rollout_student,
 )
+from optdistil.distill.train import (
+    calibrate_student_magnitude,
+    magnitude_calibration_scale,
+    train_student,
+)
 from optdistil.distill.trajectory import TrajectoryDataset, TrajectoryRecord
 
 __all__ = [
@@ -30,11 +35,14 @@ __all__ = [
     "TrajectoryRecord",
     "build_elementwise_features",
     "build_matrix_aware_features",
+    "calibrate_student_magnitude",
     "collect_teacher_step",
     "collect_teacher_trajectory",
     "direction_loss",
     "distillation_loss",
     "evaluate_imitation",
+    "magnitude_calibration_scale",
     "magnitude_loss",
     "rollout_student",
+    "train_student",
 ]
