@@ -37,15 +37,28 @@ This makes teacher-size scaling experiments meaningful: a larger teacher is not 
 
 OptDistil uses [uv](https://docs.astral.sh/uv/) for dependency management and reproducible development environments. Python 3.11 is pinned for local development in `.python-version`, while the package itself supports Python 3.10 and newer.
 
-```bash
-# Create/update .venv and install the project + dev dependencies.
-uv sync
+PyTorch is selected explicitly as either a CPU-only or CUDA 13.0 build. The two extras are mutually exclusive.
 
-# Run commands inside the locked environment.
-uv run pytest -q
-uv run ruff check .
-uv run python scripts/smoke_distill.py
+### CPU
+
+```bash
+uv sync --extra cpu
+uv run --extra cpu pytest -q
+uv run --extra cpu ruff check .
+uv run --extra cpu python scripts/smoke_distill.py
 ```
+
+The CPU extra uses PyTorch's CPU-only wheel index, so CUDA runtime packages are not downloaded.
+
+### NVIDIA GPU / CUDA 13.0
+
+```bash
+uv sync --extra cu130
+uv run --extra cu130 pytest -q
+uv run --extra cu130 python scripts/smoke_distill.py
+```
+
+Use `cu130` only on systems with a sufficiently recent NVIDIA driver. The CUDA runtime used by PyTorch comes from the wheel environment; a separately installed CUDA toolkit is not required for ordinary PyTorch execution.
 
 After changing dependencies, refresh the lockfile with:
 
