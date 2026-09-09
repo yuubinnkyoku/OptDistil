@@ -1,6 +1,10 @@
 import torch
 
-from optdistil.distill.rollout import collect_teacher_trajectory, evaluate_imitation, rollout_student
+from optdistil.distill.rollout import (
+    collect_teacher_trajectory,
+    evaluate_imitation,
+    rollout_student,
+)
 from optdistil.distill.train import train_student
 from optdistil.students.tiny_mlp import TinyMLPOptimizer
 from optdistil.tasks.quadratic import QuadraticTask
