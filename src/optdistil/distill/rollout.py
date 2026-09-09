@@ -7,7 +7,7 @@ import torch
 from torch import Tensor, nn
 
 from optdistil.distill.collect import TeacherOptimizer, collect_teacher_step
-from optdistil.distill.features import build_elementwise_features
+from optdistil.distill.features import FeatureBuilder, build_elementwise_features
 from optdistil.distill.losses import DistillationLossWeights, distillation_loss
 from optdistil.distill.trajectory import TrajectoryRecord
 from optdistil.students.tiny_mlp import StudentState
@@ -52,6 +52,7 @@ def collect_teacher_trajectory(
     teacher: TeacherOptimizer,
     steps: int,
     teacher_name: str | None = None,
+    feature_builder: FeatureBuilder = build_elementwise_features,
 ) -> tuple[list[TrajectoryRecord], RolloutResult]:
     """Roll a teacher forward while recording only student-visible observations."""
     if steps <= 0:
@@ -72,6 +73,7 @@ def collect_teacher_trajectory(
             step=step,
             total_steps=steps,
             teacher_name=teacher_name,
+            feature_builder=feature_builder,
         )
         loss_before = losses[-1]
         parameter = parameter + record.teacher_update.reshape_as(parameter)
@@ -95,6 +97,7 @@ def rollout_student(
     task: OptimizationTask,
     *,
     steps: int,
+    feature_builder: FeatureBuilder = build_elementwise_features,
 ) -> RolloutResult:
     """Use a distilled elementwise student as an optimizer on a fresh task."""
     if steps <= 0:
@@ -108,7 +111,7 @@ def rollout_student(
     for step in range(1, steps + 1):
         grad = task.grad(parameter)
         momentum, second_moment = state.observe(grad)
-        features = build_elementwise_features(
+        features = feature_builder(
             parameter,
             grad,
             momentum,
