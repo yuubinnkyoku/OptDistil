@@ -3,7 +3,6 @@ from __future__ import annotations
 import argparse
 import json
 import math
-import statistics
 from collections.abc import Callable
 
 import torch
