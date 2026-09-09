@@ -31,3 +31,5 @@ jobs:
         run: uv run --locked --extra cpu python scripts/compare_teachers.py --quick
       - name: Teacher condition probe
         run: uv run --locked --extra cpu python scripts/probe_teacher_conditions.py
+      - name: Student teacher mechanism probe
+        run: uv run --locked --extra cpu python scripts/probe_student_teacher_mechanisms.py
