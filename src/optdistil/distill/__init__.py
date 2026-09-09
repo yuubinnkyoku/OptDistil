@@ -15,9 +15,11 @@ from optdistil.distill.losses import (
 )
 from optdistil.distill.rollout import (
     RolloutResult,
+    ScaleSelectionResult,
     collect_teacher_trajectory,
     evaluate_imitation,
     rollout_student,
+    select_student_output_scale,
 )
 from optdistil.distill.train import (
     calibrate_student_magnitude,
@@ -31,6 +33,7 @@ __all__ = [
     "MATRIX_FEATURE_NAMES",
     "DistillationLossWeights",
     "RolloutResult",
+    "ScaleSelectionResult",
     "TrajectoryDataset",
     "TrajectoryRecord",
     "build_elementwise_features",
@@ -44,5 +47,6 @@ __all__ = [
     "magnitude_calibration_scale",
     "magnitude_loss",
     "rollout_student",
+    "select_student_output_scale",
     "train_student",
 ]
