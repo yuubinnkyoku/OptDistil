@@ -1,8 +1,9 @@
 from __future__ import annotations
 
+from collections.abc import Iterable
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Any
 
 import torch
 from torch import Tensor
@@ -30,7 +31,7 @@ class TrajectoryRecord:
         if self.features.shape[0] != self.teacher_update.shape[0]:
             raise ValueError("features and teacher_update must describe the same elements")
 
-    def cpu(self) -> "TrajectoryRecord":
+    def cpu(self) -> TrajectoryRecord:
         return TrajectoryRecord(
             features=self.features.detach().cpu(),
             teacher_update=self.teacher_update.detach().cpu(),
@@ -60,6 +61,6 @@ class TrajectoryDataset(Dataset[TrajectoryRecord]):
         torch.save(payload, Path(path))
 
     @classmethod
-    def load(cls, path: str | Path) -> "TrajectoryDataset":
+    def load(cls, path: str | Path) -> TrajectoryDataset:
         payload = torch.load(Path(path), map_location="cpu", weights_only=True)
         return cls(TrajectoryRecord(**item) for item in payload)
