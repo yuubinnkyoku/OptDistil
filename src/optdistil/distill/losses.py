@@ -30,12 +30,16 @@ class DistillationLossWeights:
     magnitude: float = 0.3
 
 
+DEFAULT_DISTILLATION_WEIGHTS = DistillationLossWeights()
+
+
 def distillation_loss(
     student_update: Tensor,
     teacher_update: Tensor,
     *,
-    weights: DistillationLossWeights = DistillationLossWeights(),
+    weights: DistillationLossWeights | None = None,
 ) -> tuple[Tensor, dict[str, Tensor]]:
+    weights = weights or DEFAULT_DISTILLATION_WEIGHTS
     direction = direction_loss(student_update, teacher_update)
     magnitude = magnitude_loss(student_update, teacher_update)
     total = weights.direction * direction + weights.magnitude * magnitude
