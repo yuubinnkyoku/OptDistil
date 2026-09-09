@@ -33,13 +33,27 @@ The current student observation is deliberately small and teacher-independent:
 
 This makes teacher-size scaling experiments meaningful: a larger teacher is not allowed to secretly give the student more information.
 
-## Quick start
+## Development with uv
+
+OptDistil uses [uv](https://docs.astral.sh/uv/) for dependency management and reproducible development environments. Python 3.11 is pinned for local development in `.python-version`, while the package itself supports Python 3.10 and newer.
 
 ```bash
-python -m pip install -e ".[dev]"
-pytest -q
-python scripts/smoke_distill.py
+# Create/update .venv and install the project + dev dependencies.
+uv sync
+
+# Run commands inside the locked environment.
+uv run pytest -q
+uv run ruff check .
+uv run python scripts/smoke_distill.py
 ```
+
+After changing dependencies, refresh the lockfile with:
+
+```bash
+uv lock
+```
+
+Commit both `pyproject.toml` and `uv.lock` when dependency resolution changes.
 
 ## Initial scope
 
