@@ -17,3 +17,8 @@ class QuadraticTask:
 
     def grad(self, parameter: Tensor) -> Tensor:
         return self.curvature * (parameter - self.target)
+
+    def hessian_vector(self, vector: Tensor) -> Tensor:
+        if vector.shape != self.target.shape:
+            raise ValueError("vector shape must match target shape")
+        return self.curvature * vector
