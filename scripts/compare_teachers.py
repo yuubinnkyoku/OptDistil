@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 from collections.abc import Callable
 from dataclasses import asdict, dataclass
 
@@ -16,6 +17,7 @@ from optdistil.distill.rollout import (
     collect_teacher_trajectory,
     evaluate_imitation,
     rollout_student,
+    rollout_teacher,
     select_student_output_scale,
 )
 from optdistil.distill.train import calibrate_student_magnitude, train_student
@@ -24,13 +26,16 @@ from optdistil.tasks.quadratic import QuadraticTask
 from optdistil.teachers.adamw import AdamWTeacher
 from optdistil.teachers.muon import MuonTeacher
 
-TeacherFactory = Callable[[], object]
-SCALE_CANDIDATES = (0.25, 0.5, 0.75, 1.0, 1.5, 2.0)
+TeacherFactory = Callable[[float], object]
+TEACHER_LR_CANDIDATES = (0.01, 0.03, 0.06, 0.1, 0.2)
+STUDENT_SCALE_CANDIDATES = (0.25, 0.5, 0.75, 1.0, 1.5, 2.0, 3.0, 4.0)
 
 
 @dataclass(frozen=True, slots=True)
 class ComparisonResult:
     teacher: str
+    teacher_lr: float
+    teacher_validation_loss_ratio: float
     feature_set: str
     student_parameters: int
     train_records: int
@@ -71,14 +76,42 @@ def make_quadratic(seed: int, *, size: int, device: torch.device) -> tuple[torch
     return initial, QuadraticTask(target, curvature)
 
 
+def select_teacher_lr(
+    teacher_factory: TeacherFactory,
+    validation_cases: list[tuple[torch.Tensor, QuadraticTask]],
+    *,
+    steps: int,
+) -> tuple[float, float]:
+    """Tune teacher learning rate on the same validation distribution used by students."""
+    scores: list[tuple[float, float]] = []
+    for lr in TEACHER_LR_CANDIDATES:
+        ratios = []
+        for initial_parameter, task in validation_cases:
+            result = rollout_teacher(
+                initial_parameter,
+                task,
+                teacher=teacher_factory(lr),
+                steps=steps,
+            )
+            ratios.append(result.loss_ratio if result.finite else math.inf)
+        scores.append((lr, sum(ratios) / len(ratios)))
+
+    best_lr, best_score = min(scores, key=lambda item: item[1])
+    if not math.isfinite(best_score):
+        raise ValueError("all teacher learning-rate candidates produced non-finite rollouts")
+    return best_lr, best_score
+
+
 def run_one_teacher(
     name: str,
     teacher_factory: TeacherFactory,
     *,
+    teacher_lr: float,
+    teacher_validation_loss_ratio: float,
     feature_set: str,
     feature_builder: FeatureBuilder,
+    validation_cases: list[tuple[torch.Tensor, QuadraticTask]],
     train_tasks: int,
-    validation_tasks: int,
     steps: int,
     epochs: int,
     size: int,
@@ -91,7 +124,7 @@ def run_one_teacher(
         records, _ = collect_teacher_trajectory(
             initial,
             task,
-            teacher=teacher_factory(),
+            teacher=teacher_factory(teacher_lr),
             steps=steps,
             teacher_name=name,
             feature_builder=feature_builder,
@@ -106,7 +139,7 @@ def run_one_teacher(
     heldout_records, teacher_rollout = collect_teacher_trajectory(
         heldout_initial,
         heldout_task,
-        teacher=teacher_factory(),
+        teacher=teacher_factory(teacher_lr),
         steps=steps,
         teacher_name=name,
         feature_builder=feature_builder,
@@ -132,14 +165,10 @@ def run_one_teacher(
     )
 
     student.set_output_scale(1.0)
-    validation_cases = [
-        make_quadratic(8001 + task_index, size=size, device=device)
-        for task_index in range(validation_tasks)
-    ]
     scale_selection = select_student_output_scale(
         student,
         validation_cases,
-        candidates=SCALE_CANDIDATES,
+        candidates=STUDENT_SCALE_CANDIDATES,
         steps=steps,
         feature_builder=feature_builder,
     )
@@ -155,6 +184,8 @@ def run_one_teacher(
 
     return ComparisonResult(
         teacher=name,
+        teacher_lr=teacher_lr,
+        teacher_validation_loss_ratio=teacher_validation_loss_ratio,
         feature_set=feature_set,
         student_parameters=student.parameter_count,
         train_records=len(train_records),
@@ -181,7 +212,7 @@ def run_one_teacher(
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Compare tiny students distilled from AdamW and Muon teachers."
+        description="Compare tiny students distilled from tuned AdamW and Muon teachers."
     )
     parser.add_argument("--train-tasks", type=int, default=4)
     parser.add_argument("--validation-tasks", type=int, default=2)
@@ -208,16 +239,24 @@ def main() -> None:
         args.size = 6
 
     device = torch.device(args.device)
-    teachers: tuple[tuple[str, TeacherFactory], ...] = (
+    validation_cases = [
+        make_quadratic(8001 + task_index, size=args.size, device=device)
+        for task_index in range(args.validation_tasks)
+    ]
+    teacher_specs: tuple[tuple[str, TeacherFactory], ...] = (
         (
             "adamw",
-            lambda: AdamWTeacher(lr=0.03, betas=(0.9, 0.99)),
+            lambda lr: AdamWTeacher(lr=lr, betas=(0.9, 0.99)),
         ),
         (
             "muon",
-            lambda: MuonTeacher(lr=0.03, momentum=0.95, ns_steps=5),
+            lambda lr: MuonTeacher(lr=lr, momentum=0.95, ns_steps=5),
         ),
     )
+    tuned_teachers = [
+        (name, factory, *select_teacher_lr(factory, validation_cases, steps=args.steps))
+        for name, factory in teacher_specs
+    ]
     feature_sets: tuple[tuple[str, FeatureBuilder], ...] = (
         ("elementwise", build_elementwise_features),
         ("matrix_aware", build_matrix_aware_features),
@@ -227,25 +266,28 @@ def main() -> None:
         run_one_teacher(
             teacher_name,
             factory,
+            teacher_lr=teacher_lr,
+            teacher_validation_loss_ratio=teacher_validation_loss_ratio,
             feature_set=feature_name,
             feature_builder=feature_builder,
+            validation_cases=validation_cases,
             train_tasks=args.train_tasks,
-            validation_tasks=args.validation_tasks,
             steps=args.steps,
             epochs=args.epochs,
             size=args.size,
             student_seed=args.student_seed,
             device=device,
         )
-        for teacher_name, factory in teachers
+        for teacher_name, factory, teacher_lr, teacher_validation_loss_ratio in tuned_teachers
         for feature_name, feature_builder in feature_sets
     ]
 
     payload = {
-        "experiment": "teacher_feature_scale_comparison",
+        "experiment": "tuned_teacher_feature_scale_comparison",
         "train_tasks": args.train_tasks,
         "validation_tasks": args.validation_tasks,
-        "scale_candidates": SCALE_CANDIDATES,
+        "teacher_lr_candidates": TEACHER_LR_CANDIDATES,
+        "student_scale_candidates": STUDENT_SCALE_CANDIDATES,
         "steps": args.steps,
         "epochs": args.epochs,
         "size": args.size,
