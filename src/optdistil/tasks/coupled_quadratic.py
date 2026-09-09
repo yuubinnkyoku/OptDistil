@@ -37,5 +37,9 @@ class CoupledMatrixQuadraticTask:
     def grad(self, parameter: Tensor) -> Tensor:
         if parameter.shape != self.target.shape:
             raise ValueError("parameter shape must match target shape")
-        delta = parameter - self.target
-        return self.left.mT @ (self.left @ delta @ self.right) @ self.right.mT
+        return self.hessian_vector(parameter - self.target)
+
+    def hessian_vector(self, vector: Tensor) -> Tensor:
+        if vector.shape != self.target.shape:
+            raise ValueError("vector shape must match target shape")
+        return self.left.mT @ (self.left @ vector @ self.right) @ self.right.mT
