@@ -29,8 +29,9 @@ from optdistil.teachers.adamw import AdamWTeacher
 from optdistil.teachers.muon import MuonTeacher
 
 TeacherFactory = Callable[[float], object]
-TEACHER_LR_CANDIDATES = (0.01, 0.03, 0.06, 0.1, 0.2)
-STUDENT_SCALE_CANDIDATES = (0.25, 0.5, 0.75, 1.0, 1.5, 2.0, 3.0, 4.0)
+ADAMW_LR_CANDIDATES = (0.01, 0.03, 0.06, 0.1, 0.2)
+MUON_LR_CANDIDATES = (0.01, 0.03, 0.06, 0.1, 0.2, 0.3, 0.4, 0.6, 0.8)
+STUDENT_SCALE_CANDIDATES = (0.25, 0.5, 0.75, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0, 8.0)
 OBJECTIVES: tuple[tuple[str, DistillationLossWeights], ...] = (
     ("joint", DistillationLossWeights(direction=0.7, magnitude=0.3)),
     ("direction_only", DistillationLossWeights(direction=1.0, magnitude=0.0)),
@@ -121,11 +122,15 @@ def select_teacher_lr(
     teacher_factory: TeacherFactory,
     validation_cases: list[tuple[torch.Tensor, QuadraticTask]],
     *,
+    candidates: tuple[float, ...],
     steps: int,
 ) -> tuple[float, float]:
-    """Tune teacher learning rate on the same validation distribution used by students."""
+    """Tune teacher learning rate on the validation task distribution."""
+    if not candidates:
+        raise ValueError("at least one teacher learning-rate candidate is required")
+
     scores: list[tuple[float, float]] = []
-    for lr in TEACHER_LR_CANDIDATES:
+    for lr in candidates:
         ratios = []
         for initial_parameter, task in validation_cases:
             result = rollout_teacher(
@@ -174,6 +179,7 @@ def run_one_teacher(
     teacher_factory: TeacherFactory,
     *,
     teacher_lr: float,
+    teacher_lr_candidates: tuple[float, ...],
     teacher_validation_loss_ratio: float,
     feature_set: str,
     feature_builder: FeatureBuilder,
@@ -284,8 +290,8 @@ def run_one_teacher(
         teacher=name,
         teacher_lr=teacher_lr,
         teacher_lr_at_boundary=teacher_lr in {
-            TEACHER_LR_CANDIDATES[0],
-            TEACHER_LR_CANDIDATES[-1],
+            teacher_lr_candidates[0],
+            teacher_lr_candidates[-1],
         },
         teacher_validation_loss_ratio=teacher_validation_loss_ratio,
         feature_set=feature_set,
@@ -416,19 +422,31 @@ def main() -> None:
         make_quadratic(9001 + task_index, size=args.size, device=device)
         for task_index in range(args.test_tasks)
     ]
-    teacher_specs: tuple[tuple[str, TeacherFactory], ...] = (
+    teacher_specs: tuple[tuple[str, TeacherFactory, tuple[float, ...]], ...] = (
         (
             "adamw",
             lambda lr: AdamWTeacher(lr=lr, betas=(0.9, 0.99)),
+            ADAMW_LR_CANDIDATES,
         ),
         (
             "muon",
             lambda lr: MuonTeacher(lr=lr, momentum=0.95, ns_steps=5),
+            MUON_LR_CANDIDATES,
         ),
     )
     tuned_teachers = [
-        (name, factory, *select_teacher_lr(factory, validation_cases, steps=args.steps))
-        for name, factory in teacher_specs
+        (
+            name,
+            factory,
+            lr_candidates,
+            *select_teacher_lr(
+                factory,
+                validation_cases,
+                candidates=lr_candidates,
+                steps=args.steps,
+            ),
+        )
+        for name, factory, lr_candidates in teacher_specs
     ]
     feature_sets: tuple[tuple[str, FeatureBuilder], ...] = (
         ("elementwise", build_elementwise_features),
@@ -441,6 +459,7 @@ def main() -> None:
             teacher_name,
             factory,
             teacher_lr=teacher_lr,
+            teacher_lr_candidates=teacher_lr_candidates,
             teacher_validation_loss_ratio=teacher_validation_loss_ratio,
             feature_set=feature_name,
             feature_builder=feature_builder,
@@ -455,7 +474,13 @@ def main() -> None:
             student_seed=student_seed,
             device=device,
         )
-        for teacher_name, factory, teacher_lr, teacher_validation_loss_ratio in tuned_teachers
+        for (
+            teacher_name,
+            factory,
+            teacher_lr_candidates,
+            teacher_lr,
+            teacher_validation_loss_ratio,
+        ) in tuned_teachers
         for feature_name, feature_builder in feature_sets
         for objective_name, objective_weights in OBJECTIVES
         for student_seed in student_seeds
@@ -463,11 +488,14 @@ def main() -> None:
     summaries = summarize_seed_results(results)
 
     payload = {
-        "experiment": "multi_seed_objective_ablation",
+        "experiment": "expanded_sweep_multi_seed_objective_ablation",
         "train_tasks": args.train_tasks,
         "validation_tasks": args.validation_tasks,
         "test_tasks": args.test_tasks,
-        "teacher_lr_candidates": TEACHER_LR_CANDIDATES,
+        "teacher_lr_candidates": {
+            "adamw": ADAMW_LR_CANDIDATES,
+            "muon": MUON_LR_CANDIDATES,
+        },
         "student_scale_candidates": STUDENT_SCALE_CANDIDATES,
         "objectives": [name for name, _ in OBJECTIVES],
         "student_seed_base": args.student_seed,
