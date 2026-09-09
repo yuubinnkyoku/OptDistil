@@ -14,6 +14,7 @@ from optdistil.distill.features import (
     build_elementwise_features,
     build_matrix_aware_features,
 )
+from optdistil.distill.losses import DistillationLossWeights
 from optdistil.distill.rollout import (
     collect_teacher_trajectory,
     evaluate_imitation,
@@ -30,6 +31,10 @@ from optdistil.teachers.muon import MuonTeacher
 TeacherFactory = Callable[[float], object]
 TEACHER_LR_CANDIDATES = (0.01, 0.03, 0.06, 0.1, 0.2)
 STUDENT_SCALE_CANDIDATES = (0.25, 0.5, 0.75, 1.0, 1.5, 2.0, 3.0, 4.0)
+OBJECTIVES: tuple[tuple[str, DistillationLossWeights], ...] = (
+    ("joint", DistillationLossWeights(direction=0.7, magnitude=0.3)),
+    ("direction_only", DistillationLossWeights(direction=1.0, magnitude=0.0)),
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -39,6 +44,7 @@ class ComparisonResult:
     teacher_lr_at_boundary: bool
     teacher_validation_loss_ratio: float
     feature_set: str
+    objective: str
     student_parameters: int
     train_records: int
     train_distillation_loss: float
@@ -149,6 +155,8 @@ def run_one_teacher(
     teacher_validation_loss_ratio: float,
     feature_set: str,
     feature_builder: FeatureBuilder,
+    objective_name: str,
+    objective_weights: DistillationLossWeights,
     validation_cases: list[tuple[torch.Tensor, QuadraticTask]],
     test_cases: list[tuple[torch.Tensor, QuadraticTask]],
     train_tasks: int,
@@ -173,7 +181,13 @@ def run_one_teacher(
 
     torch.manual_seed(student_seed)
     student = TinyMLPOptimizer().to(device)
-    history = train_student(student, train_records, epochs=epochs, lr=3e-3)
+    history = train_student(
+        student,
+        train_records,
+        epochs=epochs,
+        lr=3e-3,
+        weights=objective_weights,
+    )
 
     heldout_records = []
     teacher_ratios: list[float] = []
@@ -190,7 +204,11 @@ def run_one_teacher(
         teacher_ratios.append(teacher_rollout.loss_ratio if teacher_rollout.finite else math.inf)
     teacher_loss_ratio, teacher_loss_ratio_std = mean_and_std(teacher_ratios)
 
-    imitation_uncalibrated = evaluate_imitation(student, heldout_records)
+    imitation_uncalibrated = evaluate_imitation(
+        student,
+        heldout_records,
+        weights=objective_weights,
+    )
     (
         student_loss_ratio_uncalibrated,
         student_loss_ratio_uncalibrated_std,
@@ -204,7 +222,11 @@ def run_one_teacher(
     )
 
     teacher_magnitude_scale = calibrate_student_magnitude(student, train_records)
-    teacher_calibrated_imitation = evaluate_imitation(student, heldout_records)
+    teacher_calibrated_imitation = evaluate_imitation(
+        student,
+        heldout_records,
+        weights=objective_weights,
+    )
     (
         teacher_calibrated_student_loss_ratio,
         teacher_calibrated_student_loss_ratio_std,
@@ -226,7 +248,7 @@ def run_one_teacher(
         feature_builder=feature_builder,
     )
 
-    imitation = evaluate_imitation(student, heldout_records)
+    imitation = evaluate_imitation(student, heldout_records, weights=objective_weights)
     student_loss_ratio, student_loss_ratio_std, student_final_loss, student_finite = (
         evaluate_student_rollouts(
             student,
@@ -245,6 +267,7 @@ def run_one_teacher(
         },
         teacher_validation_loss_ratio=teacher_validation_loss_ratio,
         feature_set=feature_set,
+        objective=objective_name,
         student_parameters=student.parameter_count,
         train_records=len(train_records),
         train_distillation_loss=history[-1],
@@ -345,6 +368,8 @@ def main() -> None:
             teacher_validation_loss_ratio=teacher_validation_loss_ratio,
             feature_set=feature_name,
             feature_builder=feature_builder,
+            objective_name=objective_name,
+            objective_weights=objective_weights,
             validation_cases=validation_cases,
             test_cases=test_cases,
             train_tasks=args.train_tasks,
@@ -356,15 +381,17 @@ def main() -> None:
         )
         for teacher_name, factory, teacher_lr, teacher_validation_loss_ratio in tuned_teachers
         for feature_name, feature_builder in feature_sets
+        for objective_name, objective_weights in OBJECTIVES
     ]
 
     payload = {
-        "experiment": "multi_test_tuned_teacher_feature_scale_comparison",
+        "experiment": "objective_ablation_multi_test",
         "train_tasks": args.train_tasks,
         "validation_tasks": args.validation_tasks,
         "test_tasks": args.test_tasks,
         "teacher_lr_candidates": TEACHER_LR_CANDIDATES,
         "student_scale_candidates": STUDENT_SCALE_CANDIDATES,
+        "objectives": [name for name, _ in OBJECTIVES],
         "steps": args.steps,
         "epochs": args.epochs,
         "size": args.size,
