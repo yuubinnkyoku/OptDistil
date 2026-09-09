@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import statistics
 from dataclasses import asdict
 
 import torch
@@ -14,9 +15,11 @@ from compare_teachers import (
 )
 
 from optdistil.distill.features import build_matrix_aware_features
+from optdistil.distill.rollout import rollout_exact_line_search_gradient
 from optdistil.teachers.gradient_direction import GradientDirectionTeacher
 from optdistil.teachers.momentum_direction import MomentumDirectionTeacher
 from optdistil.teachers.muon import MuonTeacher
+from optdistil.teachers.muon_controls import MuonNormGradientTeacher, PermutedMuonTeacher
 from optdistil.teachers.random_direction import RandomDirectionTeacher
 
 LR_CANDIDATES = (0.005, 0.01, 0.03, 0.06, 0.1, 0.2, 0.3, 0.4, 0.6, 0.8, 1.2)
@@ -25,7 +28,10 @@ CONDITIONS = (30.0, 300.0)
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Compare tiny students distilled from gradient, momentum, Muon, and random directions."
+        description=(
+            "Compare tiny students distilled from gradient, momentum, Muon, and "
+            "mechanistic control directions."
+        )
     )
     parser.add_argument("--size", type=int, default=6)
     parser.add_argument("--steps", type=int, default=8)
@@ -39,7 +45,10 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
-def print_compact_summaries(summaries: list[dict[str, object]]) -> None:
+def print_compact_summaries(
+    summaries: list[dict[str, object]],
+    oracle_summaries: list[dict[str, float]],
+) -> None:
     """Emit stable one-line summaries so CI logs remain easy to inspect."""
     print("MECHANISM_SUMMARY_BEGIN")
     for row in sorted(
@@ -59,6 +68,16 @@ def print_compact_summaries(summaries: list[dict[str, object]]) -> None:
             f"scale={float(row['validation_scale_mean']):.3f} "
             f"dir_loss={float(row['heldout_direction_loss_mean']):.6f} "
             f"scale_boundary={float(row['validation_scale_boundary_fraction']):.3f}"
+        )
+    for row in sorted(oracle_summaries, key=lambda item: item["condition"]):
+        print(
+            "ORACLE "
+            f"condition={row['condition']:g} "
+            f"optimizer=exact_line_search_gradient "
+            f"loss_ratio={row['loss_ratio_mean']:.6f}"
+            f"+/-{row['loss_ratio_std']:.6f} "
+            f"normalized_aulc={row['normalized_aulc_mean']:.6f}"
+            f"+/-{row['normalized_aulc_std']:.6f}"
         )
     print("MECHANISM_SUMMARY_END")
 
@@ -83,13 +102,27 @@ def main() -> None:
             "momentum_direction",
             lambda lr: MomentumDirectionTeacher(lr=lr, momentum=0.95, nesterov=True),
         ),
+        (
+            "muon_norm_gradient",
+            lambda lr: MuonNormGradientTeacher(lr=lr, momentum=0.95, ns_steps=5),
+        ),
         ("muon", lambda lr: MuonTeacher(lr=lr, momentum=0.95, ns_steps=5)),
+        (
+            "permuted_muon",
+            lambda lr: PermutedMuonTeacher(
+                lr=lr,
+                momentum=0.95,
+                ns_steps=5,
+                seed=2026,
+            ),
+        ),
         ("random_direction", lambda lr: RandomDirectionTeacher(lr=lr, seed=2026)),
     )
     student_seeds = [args.student_seed + offset for offset in range(args.student_seeds)]
 
     all_results = []
     all_summaries = []
+    oracle_summaries: list[dict[str, float]] = []
     for condition in CONDITIONS:
         task_factory = lambda seed, condition=condition: make_coupled_quadratic(
             seed,
@@ -106,6 +139,26 @@ def main() -> None:
         test_cases = [
             task_factory(9001 + task_index) for task_index in range(args.test_tasks)
         ]
+
+        exact_rollouts = [
+            rollout_exact_line_search_gradient(initial, task, steps=args.steps)
+            for initial, task in test_cases
+        ]
+        exact_ratios = [rollout.loss_ratio for rollout in exact_rollouts]
+        exact_aulcs = [rollout.normalized_aulc for rollout in exact_rollouts]
+        oracle_summaries.append(
+            {
+                "condition": condition,
+                "loss_ratio_mean": statistics.fmean(exact_ratios),
+                "loss_ratio_std": statistics.pstdev(exact_ratios)
+                if len(exact_ratios) > 1
+                else 0.0,
+                "normalized_aulc_mean": statistics.fmean(exact_aulcs),
+                "normalized_aulc_std": statistics.pstdev(exact_aulcs)
+                if len(exact_aulcs) > 1
+                else 0.0,
+            }
+        )
 
         condition_results = []
         for teacher_name, factory in teacher_specs:
@@ -160,11 +213,12 @@ def main() -> None:
         "epochs": args.epochs,
         "student_seeds": args.student_seeds,
         "device": str(device),
+        "oracle_summaries": oracle_summaries,
         "summaries": all_summaries,
         "results": all_results,
     }
     print(json.dumps(payload, indent=2, sort_keys=True))
-    print_compact_summaries(all_summaries)
+    print_compact_summaries(all_summaries, oracle_summaries)
 
 
 if __name__ == "__main__":
