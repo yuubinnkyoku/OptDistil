@@ -1,0 +1,174 @@
+from __future__ import annotations
+
+import argparse
+import json
+from collections.abc import Callable
+from dataclasses import asdict, dataclass
+
+import torch
+
+from optdistil.distill.rollout import (
+    collect_teacher_trajectory,
+    evaluate_imitation,
+    rollout_student,
+)
+from optdistil.distill.train import train_student
+from optdistil.students.tiny_mlp import TinyMLPOptimizer
+from optdistil.tasks.quadratic import QuadraticTask
+from optdistil.teachers.adamw import AdamWTeacher
+from optdistil.teachers.muon import MuonTeacher
+
+TeacherFactory = Callable[[], object]
+
+
+@dataclass(frozen=True, slots=True)
+class ComparisonResult:
+    teacher: str
+    student_parameters: int
+    train_records: int
+    train_distillation_loss: float
+    heldout_imitation_loss: float
+    heldout_direction_loss: float
+    heldout_magnitude_loss: float
+    teacher_loss_ratio: float
+    student_loss_ratio: float
+    student_final_loss: float
+    student_finite: bool
+
+
+def make_quadratic(seed: int, *, size: int, device: torch.device) -> tuple[torch.Tensor, QuadraticTask]:
+    """Construct a reproducible matrix-shaped quadratic with mild anisotropy."""
+    generator = torch.Generator(device="cpu").manual_seed(seed)
+    initial = torch.randn((size, size), generator=generator) * 0.6
+    target = torch.randn((size, size), generator=generator) * 0.3
+
+    row = torch.linspace(0.6, 1.8, size).square().unsqueeze(1)
+    col = torch.linspace(0.8, 1.4, size).unsqueeze(0)
+    jitter = 0.9 + 0.2 * torch.rand((size, size), generator=generator)
+    curvature = row * col * jitter
+
+    initial = initial.to(device)
+    target = target.to(device)
+    curvature = curvature.to(device)
+    return initial, QuadraticTask(target, curvature)
+
+
+def run_one_teacher(
+    name: str,
+    teacher_factory: TeacherFactory,
+    *,
+    train_tasks: int,
+    steps: int,
+    epochs: int,
+    size: int,
+    student_seed: int,
+    device: torch.device,
+) -> ComparisonResult:
+    train_records = []
+    for task_index in range(train_tasks):
+        initial, task = make_quadratic(1000 + task_index, size=size, device=device)
+        records, _ = collect_teacher_trajectory(
+            initial,
+            task,
+            teacher=teacher_factory(),
+            steps=steps,
+            teacher_name=name,
+        )
+        train_records.extend(records)
+
+    torch.manual_seed(student_seed)
+    student = TinyMLPOptimizer().to(device)
+    history = train_student(student, train_records, epochs=epochs, lr=3e-3)
+
+    heldout_initial, heldout_task = make_quadratic(9001, size=size, device=device)
+    heldout_records, teacher_rollout = collect_teacher_trajectory(
+        heldout_initial,
+        heldout_task,
+        teacher=teacher_factory(),
+        steps=steps,
+        teacher_name=name,
+    )
+    imitation = evaluate_imitation(student, heldout_records)
+    student_rollout = rollout_student(student, heldout_initial, heldout_task, steps=steps)
+
+    return ComparisonResult(
+        teacher=name,
+        student_parameters=student.parameter_count,
+        train_records=len(train_records),
+        train_distillation_loss=history[-1],
+        heldout_imitation_loss=imitation["total"],
+        heldout_direction_loss=imitation["direction"],
+        heldout_magnitude_loss=imitation["magnitude"],
+        teacher_loss_ratio=teacher_rollout.loss_ratio,
+        student_loss_ratio=student_rollout.loss_ratio,
+        student_final_loss=student_rollout.final_loss,
+        student_finite=student_rollout.finite,
+    )
+
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        description="Compare tiny students distilled from AdamW and Muon teachers."
+    )
+    parser.add_argument("--train-tasks", type=int, default=4)
+    parser.add_argument("--steps", type=int, default=24)
+    parser.add_argument("--epochs", type=int, default=60)
+    parser.add_argument("--size", type=int, default=8)
+    parser.add_argument("--student-seed", type=int, default=1234)
+    parser.add_argument("--device", default="cpu")
+    parser.add_argument(
+        "--quick",
+        action="store_true",
+        help="Use a tiny configuration suitable for CI and smoke testing.",
+    )
+    return parser.parse_args()
+
+
+def main() -> None:
+    args = parse_args()
+    if args.quick:
+        args.train_tasks = 2
+        args.steps = 8
+        args.epochs = 10
+        args.size = 6
+
+    device = torch.device(args.device)
+    factories: tuple[tuple[str, TeacherFactory], ...] = (
+        (
+            "adamw",
+            lambda: AdamWTeacher(lr=0.03, betas=(0.9, 0.99)),
+        ),
+        (
+            "muon",
+            lambda: MuonTeacher(lr=0.03, momentum=0.95, ns_steps=5),
+        ),
+    )
+
+    results = [
+        run_one_teacher(
+            name,
+            factory,
+            train_tasks=args.train_tasks,
+            steps=args.steps,
+            epochs=args.epochs,
+            size=args.size,
+            student_seed=args.student_seed,
+            device=device,
+        )
+        for name, factory in factories
+    ]
+
+    payload = {
+        "experiment": "teacher_comparison",
+        "train_tasks": args.train_tasks,
+        "steps": args.steps,
+        "epochs": args.epochs,
+        "size": args.size,
+        "device": str(device),
+        "results": [asdict(result) for result in results],
+    }
+    print(json.dumps(payload, indent=2, sort_keys=True))
+
+
+if __name__ == "__main__":
+    main()
