@@ -38,6 +38,30 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
+def print_compact_summaries(summaries: list[dict[str, object]]) -> None:
+    """Emit stable one-line summaries so CI logs remain easy to inspect."""
+    print("MECHANISM_SUMMARY_BEGIN")
+    for row in sorted(
+        summaries,
+        key=lambda item: (float(item["condition"]), str(item["teacher"]), str(item["objective"])),
+    ):
+        print(
+            "MECH "
+            f"condition={float(row['condition']):g} "
+            f"teacher={row['teacher']} "
+            f"objective={row['objective']} "
+            f"teacher_lr={float(row['teacher_lr']):.6g} "
+            f"teacher_ratio={float(row['teacher_loss_ratio']):.6f}"
+            f"+/-{float(row['teacher_loss_ratio_std']):.6f} "
+            f"student_ratio={float(row['student_loss_ratio_mean']):.6f}"
+            f"+/-{float(row['student_loss_ratio_seed_std']):.6f} "
+            f"scale={float(row['validation_scale_mean']):.3f} "
+            f"dir_loss={float(row['heldout_direction_loss_mean']):.6f} "
+            f"scale_boundary={float(row['validation_scale_boundary_fraction']):.3f}"
+        )
+    print("MECHANISM_SUMMARY_END")
+
+
 def main() -> None:
     args = parse_args()
     if min(
@@ -138,6 +162,7 @@ def main() -> None:
         "results": all_results,
     }
     print(json.dumps(payload, indent=2, sort_keys=True))
+    print_compact_summaries(all_summaries)
 
 
 if __name__ == "__main__":
