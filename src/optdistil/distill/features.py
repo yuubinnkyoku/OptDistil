@@ -48,7 +48,9 @@ def build_elementwise_features(
     parameter_rms = parameter.square().mean().add(eps).sqrt()
     progress = min(max(step / total_steps, 0.0), 1.0)
 
-    flat = lambda x: x.reshape(-1)
+    def flat(tensor: Tensor) -> Tensor:
+        return tensor.reshape(-1)
+
     return torch.stack(
         (
             flat(grad),
