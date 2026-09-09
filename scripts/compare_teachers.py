@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import json
 import math
+import statistics
 from collections.abc import Callable
 from dataclasses import asdict, dataclass
 
@@ -35,6 +36,7 @@ STUDENT_SCALE_CANDIDATES = (0.25, 0.5, 0.75, 1.0, 1.5, 2.0, 3.0, 4.0)
 class ComparisonResult:
     teacher: str
     teacher_lr: float
+    teacher_lr_at_boundary: bool
     teacher_validation_loss_ratio: float
     feature_set: str
     student_parameters: int
@@ -43,18 +45,23 @@ class ComparisonResult:
     teacher_magnitude_scale: float
     teacher_calibrated_magnitude_loss: float
     teacher_calibrated_student_loss_ratio: float
+    teacher_calibrated_student_loss_ratio_std: float
     validation_scale: float
+    validation_scale_at_boundary: bool
     validation_loss_ratio: float
     heldout_imitation_loss_uncalibrated: float
     heldout_direction_loss_uncalibrated: float
     heldout_magnitude_loss_uncalibrated: float
     student_loss_ratio_uncalibrated: float
+    student_loss_ratio_uncalibrated_std: float
     student_final_loss_uncalibrated: float
     heldout_imitation_loss: float
     heldout_direction_loss: float
     heldout_magnitude_loss: float
     teacher_loss_ratio: float
+    teacher_loss_ratio_std: float
     student_loss_ratio: float
+    student_loss_ratio_std: float
     student_final_loss: float
     student_finite: bool
 
@@ -76,6 +83,12 @@ def make_quadratic(seed: int, *, size: int, device: torch.device) -> tuple[torch
     return initial, QuadraticTask(target, curvature)
 
 
+def mean_and_std(values: list[float]) -> tuple[float, float]:
+    if not values:
+        raise ValueError("at least one value is required")
+    return statistics.fmean(values), statistics.pstdev(values) if len(values) > 1 else 0.0
+
+
 def select_teacher_lr(
     teacher_factory: TeacherFactory,
     validation_cases: list[tuple[torch.Tensor, QuadraticTask]],
@@ -94,12 +107,38 @@ def select_teacher_lr(
                 steps=steps,
             )
             ratios.append(result.loss_ratio if result.finite else math.inf)
-        scores.append((lr, sum(ratios) / len(ratios)))
+        scores.append((lr, statistics.fmean(ratios)))
 
     best_lr, best_score = min(scores, key=lambda item: item[1])
     if not math.isfinite(best_score):
         raise ValueError("all teacher learning-rate candidates produced non-finite rollouts")
     return best_lr, best_score
+
+
+def evaluate_student_rollouts(
+    student: TinyMLPOptimizer,
+    test_cases: list[tuple[torch.Tensor, QuadraticTask]],
+    *,
+    steps: int,
+    feature_builder: FeatureBuilder,
+) -> tuple[float, float, float, bool]:
+    ratios: list[float] = []
+    final_losses: list[float] = []
+    finite = True
+    for initial_parameter, task in test_cases:
+        result = rollout_student(
+            student,
+            initial_parameter,
+            task,
+            steps=steps,
+            feature_builder=feature_builder,
+        )
+        finite = finite and result.finite
+        ratios.append(result.loss_ratio if result.finite else math.inf)
+        final_losses.append(result.final_loss)
+
+    ratio_mean, ratio_std = mean_and_std(ratios)
+    return ratio_mean, ratio_std, statistics.fmean(final_losses), finite
 
 
 def run_one_teacher(
@@ -111,6 +150,7 @@ def run_one_teacher(
     feature_set: str,
     feature_builder: FeatureBuilder,
     validation_cases: list[tuple[torch.Tensor, QuadraticTask]],
+    test_cases: list[tuple[torch.Tensor, QuadraticTask]],
     train_tasks: int,
     steps: int,
     epochs: int,
@@ -135,31 +175,44 @@ def run_one_teacher(
     student = TinyMLPOptimizer().to(device)
     history = train_student(student, train_records, epochs=epochs, lr=3e-3)
 
-    heldout_initial, heldout_task = make_quadratic(9001, size=size, device=device)
-    heldout_records, teacher_rollout = collect_teacher_trajectory(
-        heldout_initial,
-        heldout_task,
-        teacher=teacher_factory(teacher_lr),
-        steps=steps,
-        teacher_name=name,
-        feature_builder=feature_builder,
-    )
+    heldout_records = []
+    teacher_ratios: list[float] = []
+    for initial_parameter, task in test_cases:
+        records, teacher_rollout = collect_teacher_trajectory(
+            initial_parameter,
+            task,
+            teacher=teacher_factory(teacher_lr),
+            steps=steps,
+            teacher_name=name,
+            feature_builder=feature_builder,
+        )
+        heldout_records.extend(records)
+        teacher_ratios.append(teacher_rollout.loss_ratio if teacher_rollout.finite else math.inf)
+    teacher_loss_ratio, teacher_loss_ratio_std = mean_and_std(teacher_ratios)
 
     imitation_uncalibrated = evaluate_imitation(student, heldout_records)
-    student_rollout_uncalibrated = rollout_student(
+    (
+        student_loss_ratio_uncalibrated,
+        student_loss_ratio_uncalibrated_std,
+        student_final_loss_uncalibrated,
+        _,
+    ) = evaluate_student_rollouts(
         student,
-        heldout_initial,
-        heldout_task,
+        test_cases,
         steps=steps,
         feature_builder=feature_builder,
     )
 
     teacher_magnitude_scale = calibrate_student_magnitude(student, train_records)
     teacher_calibrated_imitation = evaluate_imitation(student, heldout_records)
-    teacher_calibrated_rollout = rollout_student(
+    (
+        teacher_calibrated_student_loss_ratio,
+        teacher_calibrated_student_loss_ratio_std,
+        _,
+        _,
+    ) = evaluate_student_rollouts(
         student,
-        heldout_initial,
-        heldout_task,
+        test_cases,
         steps=steps,
         feature_builder=feature_builder,
     )
@@ -174,17 +227,22 @@ def run_one_teacher(
     )
 
     imitation = evaluate_imitation(student, heldout_records)
-    student_rollout = rollout_student(
-        student,
-        heldout_initial,
-        heldout_task,
-        steps=steps,
-        feature_builder=feature_builder,
+    student_loss_ratio, student_loss_ratio_std, student_final_loss, student_finite = (
+        evaluate_student_rollouts(
+            student,
+            test_cases,
+            steps=steps,
+            feature_builder=feature_builder,
+        )
     )
 
     return ComparisonResult(
         teacher=name,
         teacher_lr=teacher_lr,
+        teacher_lr_at_boundary=teacher_lr in {
+            TEACHER_LR_CANDIDATES[0],
+            TEACHER_LR_CANDIDATES[-1],
+        },
         teacher_validation_loss_ratio=teacher_validation_loss_ratio,
         feature_set=feature_set,
         student_parameters=student.parameter_count,
@@ -192,21 +250,29 @@ def run_one_teacher(
         train_distillation_loss=history[-1],
         teacher_magnitude_scale=teacher_magnitude_scale,
         teacher_calibrated_magnitude_loss=teacher_calibrated_imitation["magnitude"],
-        teacher_calibrated_student_loss_ratio=teacher_calibrated_rollout.loss_ratio,
+        teacher_calibrated_student_loss_ratio=teacher_calibrated_student_loss_ratio,
+        teacher_calibrated_student_loss_ratio_std=teacher_calibrated_student_loss_ratio_std,
         validation_scale=scale_selection.scale,
+        validation_scale_at_boundary=scale_selection.scale in {
+            STUDENT_SCALE_CANDIDATES[0],
+            STUDENT_SCALE_CANDIDATES[-1],
+        },
         validation_loss_ratio=scale_selection.validation_loss_ratio,
         heldout_imitation_loss_uncalibrated=imitation_uncalibrated["total"],
         heldout_direction_loss_uncalibrated=imitation_uncalibrated["direction"],
         heldout_magnitude_loss_uncalibrated=imitation_uncalibrated["magnitude"],
-        student_loss_ratio_uncalibrated=student_rollout_uncalibrated.loss_ratio,
-        student_final_loss_uncalibrated=student_rollout_uncalibrated.final_loss,
+        student_loss_ratio_uncalibrated=student_loss_ratio_uncalibrated,
+        student_loss_ratio_uncalibrated_std=student_loss_ratio_uncalibrated_std,
+        student_final_loss_uncalibrated=student_final_loss_uncalibrated,
         heldout_imitation_loss=imitation["total"],
         heldout_direction_loss=imitation["direction"],
         heldout_magnitude_loss=imitation["magnitude"],
-        teacher_loss_ratio=teacher_rollout.loss_ratio,
-        student_loss_ratio=student_rollout.loss_ratio,
-        student_final_loss=student_rollout.final_loss,
-        student_finite=student_rollout.finite,
+        teacher_loss_ratio=teacher_loss_ratio,
+        teacher_loss_ratio_std=teacher_loss_ratio_std,
+        student_loss_ratio=student_loss_ratio,
+        student_loss_ratio_std=student_loss_ratio_std,
+        student_final_loss=student_final_loss,
+        student_finite=student_finite,
     )
 
 
@@ -215,7 +281,8 @@ def parse_args() -> argparse.Namespace:
         description="Compare tiny students distilled from tuned AdamW and Muon teachers."
     )
     parser.add_argument("--train-tasks", type=int, default=4)
-    parser.add_argument("--validation-tasks", type=int, default=2)
+    parser.add_argument("--validation-tasks", type=int, default=4)
+    parser.add_argument("--test-tasks", type=int, default=8)
     parser.add_argument("--steps", type=int, default=24)
     parser.add_argument("--epochs", type=int, default=60)
     parser.add_argument("--size", type=int, default=8)
@@ -234,14 +301,22 @@ def main() -> None:
     if args.quick:
         args.train_tasks = 2
         args.validation_tasks = 2
+        args.test_tasks = 4
         args.steps = 8
         args.epochs = 10
         args.size = 6
+
+    if min(args.train_tasks, args.validation_tasks, args.test_tasks, args.steps, args.epochs) <= 0:
+        raise ValueError("task counts, steps, and epochs must all be positive")
 
     device = torch.device(args.device)
     validation_cases = [
         make_quadratic(8001 + task_index, size=args.size, device=device)
         for task_index in range(args.validation_tasks)
+    ]
+    test_cases = [
+        make_quadratic(9001 + task_index, size=args.size, device=device)
+        for task_index in range(args.test_tasks)
     ]
     teacher_specs: tuple[tuple[str, TeacherFactory], ...] = (
         (
@@ -271,6 +346,7 @@ def main() -> None:
             feature_set=feature_name,
             feature_builder=feature_builder,
             validation_cases=validation_cases,
+            test_cases=test_cases,
             train_tasks=args.train_tasks,
             steps=args.steps,
             epochs=args.epochs,
@@ -283,9 +359,10 @@ def main() -> None:
     ]
 
     payload = {
-        "experiment": "tuned_teacher_feature_scale_comparison",
+        "experiment": "multi_test_tuned_teacher_feature_scale_comparison",
         "train_tasks": args.train_tasks,
         "validation_tasks": args.validation_tasks,
+        "test_tasks": args.test_tasks,
         "teacher_lr_candidates": TEACHER_LR_CANDIDATES,
         "student_scale_candidates": STUDENT_SCALE_CANDIDATES,
         "steps": args.steps,
