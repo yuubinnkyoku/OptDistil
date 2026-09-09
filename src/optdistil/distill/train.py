@@ -7,6 +7,7 @@ from torch import nn
 
 from optdistil.distill.losses import DistillationLossWeights, distillation_loss
 from optdistil.distill.trajectory import TrajectoryRecord
+from optdistil.students.tiny_mlp import TinyMLPOptimizer
 
 
 def train_student(
@@ -44,3 +45,53 @@ def train_student(
         history.append(total / len(records))
 
     return history
+
+
+@torch.no_grad()
+def magnitude_calibration_scale(
+    student: nn.Module,
+    records: Iterable[TrajectoryRecord],
+    *,
+    eps: float = 1e-8,
+) -> float:
+    """Return the global scale minimizing average squared log-norm error.
+
+    For records ``k``, the current magnitude objective is
+
+    ``(log ||s * u_k|| - log ||t_k||)^2``.
+
+    Its optimum over one positive global multiplier is the geometric mean of the
+    teacher/student norm ratios. This calibration changes no update directions.
+    """
+    records = list(records)
+    if not records:
+        raise ValueError("at least one trajectory record is required")
+    if eps <= 0.0:
+        raise ValueError("eps must be positive")
+
+    log_ratios = []
+    student.eval()
+    for record in records:
+        predicted_norm = student(record.features).reshape(-1).norm().clamp_min(eps)
+        teacher_norm = record.teacher_update.reshape(-1).norm().clamp_min(eps)
+        log_ratios.append(teacher_norm.log() - predicted_norm.log())
+
+    scale = torch.stack(log_ratios).mean().exp()
+    if not torch.isfinite(scale) or scale <= 0:
+        raise ValueError("computed calibration scale is not positive and finite")
+    return float(scale)
+
+
+@torch.no_grad()
+def calibrate_student_magnitude(
+    student: TinyMLPOptimizer,
+    records: Iterable[TrajectoryRecord],
+    *,
+    eps: float = 1e-8,
+) -> float:
+    """Apply the closed-form global magnitude calibration and return the multiplier."""
+    records = list(records)
+    multiplier = magnitude_calibration_scale(student, records, eps=eps)
+    current_scale = float(student.output_scale)
+    student.set_output_scale(current_scale * multiplier)
+    return multiplier
