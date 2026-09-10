@@ -10,10 +10,15 @@ from functools import partial
 from pathlib import Path
 
 import torch
-from torch import nn
-
-from compare_teachers import MUON_LR_CANDIDATES, OBJECTIVES, Case, make_coupled_quadratic, select_teacher_lr
+from compare_teachers import (
+    MUON_LR_CANDIDATES,
+    OBJECTIVES,
+    Case,
+    make_coupled_quadratic,
+    select_teacher_lr,
+)
 from probe_muon_disagreement_tasks import CONDITIONS, select_disagreement_cases
+from torch import nn
 
 from optdistil.distill.rollout import (
     collect_teacher_trajectory,
