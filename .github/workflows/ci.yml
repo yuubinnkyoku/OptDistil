@@ -51,6 +51,10 @@ jobs:
         run: >-
           uv run --locked --extra cpu python scripts/probe_nonlinear_matrix_distillation.py
           --output artifacts/nonlinear-matrix-distillation.json
+      - name: Meta-teacher capacity scaling probe
+        run: >-
+          uv run --locked --extra cpu python scripts/probe_meta_teacher_scaling.py
+          --quick --output artifacts/meta-teacher-scaling.json
       - name: Upload disagreement probe metrics
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
@@ -78,4 +82,11 @@ jobs:
         with:
           name: nonlinear-matrix-distillation
           path: artifacts/nonlinear-matrix-distillation.json
+          if-no-files-found: ignore
+      - name: Upload meta-teacher scaling metrics
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: meta-teacher-scaling
+          path: artifacts/meta-teacher-scaling.json
           if-no-files-found: ignore
