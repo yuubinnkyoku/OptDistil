@@ -315,7 +315,10 @@ def select_objective_per_seed(runs: list[StudentRun]) -> list[SelectedStudentSum
 
 
 def nonincreasing(values: list[float], *, tolerance: float = 1e-9) -> bool:
-    return all(right <= left + tolerance for left, right in zip(values[:-1], values[1:], strict=True))
+    return all(
+        values[index] <= values[index - 1] + tolerance
+        for index in range(1, len(values))
+    )
 
 
 def main() -> None:
