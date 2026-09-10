@@ -48,13 +48,15 @@ def build_block_gain_features(
     step: int,
     total_steps: int,
     block_size: int = 64,
+    beta1: float = 0.9,
+    beta2: float = 0.999,
     eps: float = 1e-8,
 ) -> Tensor:
     """Build a blockwise observation for a cheap multiplicative learned correction.
 
-    The first column is a stable block-RMS momentum update. The remaining four columns
-    are constant within each block, so ``BlockGainOptimizer`` necessarily predicts one
-    shared gain per block without needing an explicit block id.
+    The base update uses bias-corrected EMA moments so early steps do not inherit the
+    arbitrary ``sqrt(1-beta2)/(1-beta1)`` scale of raw EMA state. The remaining four
+    columns are constant within each block, forcing one shared learned gain per block.
     """
     if parameter.shape != grad.shape:
         raise ValueError("parameter and grad must have the same shape")
@@ -64,8 +66,12 @@ def build_block_gain_features(
         raise ValueError("parameter tensor must be non-empty")
     if block_size <= 0:
         raise ValueError("block_size must be positive")
+    if step <= 0:
+        raise ValueError("step must be positive for EMA bias correction")
     if total_steps <= 0:
         raise ValueError("total_steps must be positive")
+    if not 0.0 <= beta1 < 1.0 or not 0.0 <= beta2 < 1.0:
+        raise ValueError("EMA betas must lie in [0, 1)")
     if eps <= 0.0:
         raise ValueError("eps must be positive")
 
@@ -74,12 +80,15 @@ def build_block_gain_features(
     momentum = momentum.detach()
     second_moment = second_moment.detach()
 
+    momentum_hat = momentum / (1.0 - beta1**step)
+    second_moment_hat = second_moment / (1.0 - beta2**step)
+
     numel = parameter.numel()
     grad_rms = _block_rms(grad, block_size=block_size, eps=eps)
-    momentum_rms = _block_rms(momentum, block_size=block_size, eps=eps)
+    momentum_rms = _block_rms(momentum_hat, block_size=block_size, eps=eps)
     parameter_rms = _block_rms(parameter, block_size=block_size, eps=eps)
 
-    flat_second_moment = second_moment.reshape(-1).clamp_min(0)
+    flat_second_moment = second_moment_hat.reshape(-1).clamp_min(0)
     blocks = math.ceil(numel / block_size)
     padded_numel = blocks * block_size
     if padded_numel != numel:
@@ -98,7 +107,7 @@ def build_block_gain_features(
         counts[-1] = numel % block_size
     block_rms_denom = (second_moment_blocks.sum(dim=1) / counts).add(eps).sqrt()
     denom = _expand_blocks(block_rms_denom, numel=numel, block_size=block_size)
-    base_update = -momentum.reshape(-1) / denom
+    base_update = -momentum_hat.reshape(-1) / denom
 
     progress = min(max(step / total_steps, 0.0), 1.0)
     block_observations = torch.stack(
