@@ -60,6 +60,8 @@ def build_block_gain_features(
         raise ValueError("parameter and grad must have the same shape")
     if momentum.shape != parameter.shape or second_moment.shape != parameter.shape:
         raise ValueError("student state tensors must match parameter shape")
+    if parameter.numel() == 0:
+        raise ValueError("parameter tensor must be non-empty")
     if block_size <= 0:
         raise ValueError("block_size must be positive")
     if total_steps <= 0:
@@ -118,6 +120,8 @@ class BlockGainOptimizer(nn.Module):
     With the default 4 -> 8 -> 8 -> 1 network this student has only 121 trainable
     parameters. Its expensive operations are block reductions; deployment then needs
     only a tiny shared MLP and an elementwise multiply on top of the stable base update.
+    The final layer is zero-initialized, so the untrained model is exactly the base
+    optimizer instead of a random optimizer policy.
     """
 
     def __init__(
@@ -138,7 +142,10 @@ class BlockGainOptimizer(nn.Module):
         for _ in range(hidden_layers):
             layers.extend((nn.Linear(in_dim, hidden_dim), nn.Tanh()))
             in_dim = hidden_dim
-        layers.append(nn.Linear(in_dim, 1))
+        output = nn.Linear(in_dim, 1)
+        nn.init.zeros_(output.weight)
+        nn.init.zeros_(output.bias)
+        layers.append(output)
         self.network = nn.Sequential(*layers)
         self.log_gain_limit = float(log_gain_limit)
         self.register_buffer("output_scale", torch.tensor(1.0))
