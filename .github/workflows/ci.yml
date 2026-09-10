@@ -36,4 +36,13 @@ jobs:
       - name: Same-state student Muon alignment probe
         run: uv run --locked --extra cpu python scripts/probe_same_state_alignment.py
       - name: Muon-gradient disagreement-selected probe
-        run: uv run --locked --extra cpu python scripts/probe_muon_disagreement_tasks.py
+        run: >-
+          uv run --locked --extra cpu python scripts/run_disagreement_probe.py
+          --output artifacts/muon-gradient-disagreement.json
+      - name: Upload disagreement probe metrics
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: muon-gradient-disagreement
+          path: artifacts/muon-gradient-disagreement.json
+          if-no-files-found: ignore
