@@ -43,6 +43,10 @@ jobs:
         run: >-
           uv run --locked --extra cpu python scripts/probe_block_gain_sweep.py
           --output artifacts/block-gain-sweep.json
+      - name: Row-column gain distillation probe
+        run: >-
+          uv run --locked --extra cpu python scripts/probe_row_col_gain_distillation.py
+          --output artifacts/row-col-gain-distillation.json
       - name: Upload disagreement probe metrics
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
@@ -56,4 +60,11 @@ jobs:
         with:
           name: block-gain-sweep
           path: artifacts/block-gain-sweep.json
+          if-no-files-found: ignore
+      - name: Upload row-column gain metrics
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: row-col-gain-distillation
+          path: artifacts/row-col-gain-distillation.json
           if-no-files-found: ignore
