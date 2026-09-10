@@ -39,10 +39,10 @@ jobs:
         run: >-
           uv run --locked --extra cpu python scripts/run_disagreement_probe.py
           --output artifacts/muon-gradient-disagreement.json
-      - name: Block-gain distillation probe
+      - name: Block-gain granularity sweep
         run: >-
-          uv run --locked --extra cpu python scripts/probe_block_gain_distillation.py
-          --output artifacts/block-gain-distillation.json
+          uv run --locked --extra cpu python scripts/probe_block_gain_sweep.py
+          --output artifacts/block-gain-sweep.json
       - name: Upload disagreement probe metrics
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
@@ -50,10 +50,10 @@ jobs:
           name: muon-gradient-disagreement
           path: artifacts/muon-gradient-disagreement.json
           if-no-files-found: ignore
-      - name: Upload block-gain probe metrics
+      - name: Upload block-gain sweep metrics
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
-          name: block-gain-distillation
-          path: artifacts/block-gain-distillation.json
+          name: block-gain-sweep
+          path: artifacts/block-gain-sweep.json
           if-no-files-found: ignore
