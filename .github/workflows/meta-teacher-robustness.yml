@@ -1,0 +1,49 @@
+name: meta-teacher-robustness
+
+on:
+  push:
+    branches:
+      - experiment/meta-teacher-scaling
+    paths:
+      - ".github/workflows/meta-teacher-robustness.yml"
+  workflow_dispatch:
+
+jobs:
+  robustness:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        teacher_seed: [42000, 43000, 44000]
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - name: Install uv
+        uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9 # v9.0.0
+        with:
+          version: "0.12.10"
+          python-version: "3.11"
+          enable-cache: true
+      - name: Sync CPU environment
+        run: uv sync --locked --extra cpu
+      - name: Robust teacher-capacity sweep
+        run: >-
+          uv run --locked --extra cpu python scripts/probe_meta_teacher_scaling.py
+          --widths 32 128 512
+          --steps 8
+          --meta-iterations 20
+          --meta-train-tasks 3
+          --meta-validation-tasks 3
+          --distill-train-tasks 3
+          --student-validation-tasks 3
+          --test-tasks 8
+          --distill-epochs 12
+          --student-seeds 2
+          --teacher-seed ${{ matrix.teacher_seed }}
+          --output artifacts/meta-teacher-robustness-${{ matrix.teacher_seed }}.json
+      - name: Upload seed metrics
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: meta-teacher-robustness-${{ matrix.teacher_seed }}
+          path: artifacts/meta-teacher-robustness-${{ matrix.teacher_seed }}.json
+          if-no-files-found: ignore
