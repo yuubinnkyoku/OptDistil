@@ -47,6 +47,10 @@ jobs:
         run: >-
           uv run --locked --extra cpu python scripts/probe_row_col_gain_distillation.py
           --output artifacts/row-col-gain-distillation.json
+      - name: Nonlinear matrix distillation benchmark
+        run: >-
+          uv run --locked --extra cpu python scripts/probe_nonlinear_matrix_distillation.py
+          --output artifacts/nonlinear-matrix-distillation.json
       - name: Upload disagreement probe metrics
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
@@ -67,4 +71,11 @@ jobs:
         with:
           name: row-col-gain-distillation
           path: artifacts/row-col-gain-distillation.json
+          if-no-files-found: ignore
+      - name: Upload nonlinear matrix metrics
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: nonlinear-matrix-distillation
+          path: artifacts/nonlinear-matrix-distillation.json
           if-no-files-found: ignore
