@@ -29,23 +29,25 @@ def build_row_col_gain_features(
     *,
     step: int,
     total_steps: int,
+    beta1: float = 0.9,
+    beta2: float = 0.999,
     eps: float = 1e-8,
 ) -> Tensor:
-    """Build separable row/column statistics around a stable global-RMS momentum base.
-
-    Every row statistic is constant across its row and every column statistic is constant
-    down its column. ``RowColGainOptimizer`` applies the same tiny MLP to the row and
-    column summaries and multiplies the resulting positive gains, giving a cheap
-    separable matrix preconditioner without matrix-matrix products.
-    """
+    """Build separable row/column statistics around a bias-corrected RMS-momentum base."""
     if parameter.ndim != 2:
         raise ValueError("row/column gain features require a 2-D parameter tensor")
     if parameter.shape != grad.shape:
         raise ValueError("parameter and grad must have the same shape")
     if momentum.shape != parameter.shape or second_moment.shape != parameter.shape:
         raise ValueError("student state tensors must match parameter shape")
+    if parameter.numel() == 0:
+        raise ValueError("parameter tensor must be non-empty")
+    if step <= 0:
+        raise ValueError("step must be positive for EMA bias correction")
     if total_steps <= 0:
         raise ValueError("total_steps must be positive")
+    if not 0.0 <= beta1 < 1.0 or not 0.0 <= beta2 < 1.0:
+        raise ValueError("EMA betas must lie in [0, 1)")
     if eps <= 0.0:
         raise ValueError("eps must be positive")
 
@@ -54,16 +56,19 @@ def build_row_col_gain_features(
     momentum = momentum.detach()
     second_moment = second_moment.detach()
 
+    momentum_hat = momentum / (1.0 - beta1**step)
+    second_moment_hat = second_moment / (1.0 - beta2**step)
+
     row_grad_rms = _rms(grad, dim=1, eps=eps).expand_as(grad)
-    row_momentum_rms = _rms(momentum, dim=1, eps=eps).expand_as(momentum)
+    row_momentum_rms = _rms(momentum_hat, dim=1, eps=eps).expand_as(momentum_hat)
     row_parameter_rms = _rms(parameter, dim=1, eps=eps).expand_as(parameter)
 
     col_grad_rms = _rms(grad, dim=0, eps=eps).expand_as(grad)
-    col_momentum_rms = _rms(momentum, dim=0, eps=eps).expand_as(momentum)
+    col_momentum_rms = _rms(momentum_hat, dim=0, eps=eps).expand_as(momentum_hat)
     col_parameter_rms = _rms(parameter, dim=0, eps=eps).expand_as(parameter)
 
-    global_denom = second_moment.clamp_min(0).mean().add(eps).sqrt()
-    base_update = -momentum / global_denom
+    global_denom = second_moment_hat.clamp_min(0).mean().add(eps).sqrt()
+    base_update = -momentum_hat / global_denom
     progress = min(max(step / total_steps, 0.0), 1.0)
 
     def flat(values: Tensor) -> Tensor:
@@ -88,9 +93,8 @@ class RowColGainOptimizer(nn.Module):
     """Tiny shared-MLP separable row/column gain optimizer.
 
     The default shared ``4 -> 8 -> 8 -> 1`` network has 121 trainable parameters, the
-    same learned-parameter budget as ``BlockGainOptimizer``. Applying the same network
-    to row and column summaries makes the rule transpose-symmetric while still allowing
-    the update direction to change through a separable positive diagonal operator.
+    same learned-parameter budget as ``BlockGainOptimizer``. The final layer starts at
+    zero, making the initial policy exactly the bias-corrected global-RMS momentum base.
     """
 
     def __init__(
@@ -111,7 +115,10 @@ class RowColGainOptimizer(nn.Module):
         for _ in range(hidden_layers):
             layers.extend((nn.Linear(in_dim, hidden_dim), nn.Tanh()))
             in_dim = hidden_dim
-        layers.append(nn.Linear(in_dim, 1))
+        output = nn.Linear(in_dim, 1)
+        nn.init.zeros_(output.weight)
+        nn.init.zeros_(output.bias)
+        layers.append(output)
         self.network = nn.Sequential(*layers)
         self.log_gain_limit = float(log_gain_limit)
         self.register_buffer("output_scale", torch.tensor(1.0))
