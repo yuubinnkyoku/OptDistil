@@ -3,13 +3,12 @@ import torch
 from optdistil.students.block_gain import BlockGainOptimizer, build_block_gain_features
 
 
-def test_block_gain_features_repeat_block_statistics() -> None:
+def _example_features() -> torch.Tensor:
     parameter = torch.tensor([1.0, 2.0, 3.0, 4.0])
     grad = torch.tensor([1.0, 3.0, 2.0, 4.0])
     momentum = torch.tensor([0.5, 1.0, 1.5, 2.0])
     second_moment = torch.tensor([1.0, 9.0, 4.0, 16.0])
-
-    features = build_block_gain_features(
+    return build_block_gain_features(
         parameter,
         grad,
         momentum,
@@ -19,28 +18,30 @@ def test_block_gain_features_repeat_block_statistics() -> None:
         block_size=2,
     )
 
+
+def test_block_gain_features_repeat_block_statistics() -> None:
+    features = _example_features()
+
     assert features.shape == (4, 5)
     torch.testing.assert_close(features[0, 1:], features[1, 1:])
     torch.testing.assert_close(features[2, 1:], features[3, 1:])
     assert not torch.allclose(features[0, 1:], features[2, 1:])
 
 
-def test_block_gain_predicts_one_shared_gain_per_block() -> None:
-    torch.manual_seed(0)
+def test_block_gain_starts_as_identity_correction() -> None:
+    features = _example_features()
     student = BlockGainOptimizer()
-    parameter = torch.tensor([1.0, 2.0, 3.0, 4.0])
-    grad = torch.tensor([1.0, 3.0, 2.0, 4.0])
-    momentum = torch.tensor([0.5, 1.0, 1.5, 2.0])
-    second_moment = torch.tensor([1.0, 9.0, 4.0, 16.0])
-    features = build_block_gain_features(
-        parameter,
-        grad,
-        momentum,
-        second_moment,
-        step=1,
-        total_steps=8,
-        block_size=2,
-    )
+
+    torch.testing.assert_close(student(features), features[:, 0])
+
+
+def test_block_gain_predicts_one_shared_gain_per_block_after_training_signal() -> None:
+    features = _example_features()
+    student = BlockGainOptimizer()
+    output_layer = student.network[-1]
+    with torch.no_grad():
+        output_layer.weight.fill_(0.1)
+        output_layer.bias.fill_(0.05)
 
     update = student(features)
     base_update = features[:, 0]
