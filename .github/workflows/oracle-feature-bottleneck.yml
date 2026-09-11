@@ -1,0 +1,49 @@
+name: oracle-feature-bottleneck
+
+on:
+  push:
+    branches:
+      - experiment/contextual-teacher
+    paths:
+      - "src/optdistil/distill/features.py"
+      - "scripts/probe_oracle_feature_bottleneck.py"
+      - "tests/test_gram_features.py"
+      - ".github/workflows/oracle-feature-bottleneck.yml"
+  workflow_dispatch:
+
+concurrency:
+  group: oracle-feature-bottleneck-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  compare:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - name: Install uv
+        uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9 # v9.0.0
+        with:
+          version: "0.12.10"
+          python-version: "3.11"
+          enable-cache: true
+      - name: Sync CPU environment
+        run: uv sync --locked --extra cpu
+      - name: Ruff
+        run: >-
+          uv run --locked --extra cpu ruff check
+          src/optdistil/distill/features.py
+          scripts/probe_oracle_feature_bottleneck.py
+          tests/test_gram_features.py
+      - name: Gram feature tests
+        run: uv run --locked --extra cpu pytest -q tests/test_gram_features.py
+      - name: Oracle feature bottleneck quick probe
+        run: >-
+          uv run --locked --extra cpu python scripts/probe_oracle_feature_bottleneck.py
+          --quick --output artifacts/oracle-feature-bottleneck.json
+      - name: Upload metrics
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: oracle-feature-bottleneck
+          path: artifacts/oracle-feature-bottleneck.json
+          if-no-files-found: ignore
