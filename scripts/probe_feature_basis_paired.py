@@ -20,9 +20,9 @@ from probe_oracle_feature_bottleneck import (
 
 from optdistil.distill.experimental_features import build_hybrid_gram_features
 from optdistil.distill.features import build_gram_matrix_features, build_matrix_aware_features
+from optdistil.distill.rollout import select_student_output_scale
 from optdistil.distill.train import train_student
 from optdistil.students.tiny_mlp import TinyMLPOptimizer
-from optdistil.distill.rollout import select_student_output_scale
 
 
 def parse_args() -> argparse.Namespace:
