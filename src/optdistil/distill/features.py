@@ -26,6 +26,17 @@ MATRIX_FEATURE_NAMES = (
     "progress",
 )
 
+GRAM_MATRIX_FEATURE_NAMES = (
+    "grad",
+    "momentum",
+    "rms",
+    "parameter",
+    "normalized_grad_gram_cubic",
+    "normalized_momentum_gram_cubic",
+    "parameter_rms",
+    "progress",
+)
+
 
 class FeatureBuilder(Protocol):
     def __call__(
@@ -141,6 +152,73 @@ def build_matrix_aware_features(
             flat(parameter),
             flat(row_grad_rms),
             flat(col_grad_rms),
+            parameter_rms.expand_as(flat_grad),
+            torch.full_like(flat_grad, progress),
+        ),
+        dim=-1,
+    )
+
+
+def _normalized_gram_cubic(matrix: torch.Tensor, *, eps: float) -> torch.Tensor:
+    """Return ``M M^T M / ||M||_F^2`` using the cheaper Gram orientation.
+
+    The normalization keeps the cubic matrix feature on roughly the same numerical scale
+    as ``matrix``. Choosing the smaller Gram matrix gives the same mathematical result but
+    reduces deployment GEMM cost for rectangular tensors.
+    """
+    rows, cols = matrix.shape
+    if rows <= cols:
+        cubic = (matrix @ matrix.mT) @ matrix
+    else:
+        cubic = matrix @ (matrix.mT @ matrix)
+    return cubic / matrix.square().sum().clamp_min(eps)
+
+
+def build_gram_matrix_features(
+    parameter: torch.Tensor,
+    grad: torch.Tensor,
+    momentum: torch.Tensor,
+    second_moment: torch.Tensor,
+    *,
+    step: int,
+    total_steps: int,
+    eps: float = 1e-8,
+) -> torch.Tensor:
+    """Build an 8-feature student observation with one-step matrix-polynomial directions.
+
+    Unlike scalar row/column summaries, the normalized cubic Gram terms can rotate/mix an
+    update across coordinates. They are deliberately chosen as a small NPU-friendly basis:
+    each needs only two dense matrix multiplies and no eigendecomposition, inverse, or
+    iterative Newton-Schulz loop. The learned student remains exactly the same 153-parameter
+    ``8 -> 8 -> 8 -> 1`` network.
+    """
+    _validate_inputs(parameter, grad, momentum, second_moment, total_steps)
+    if parameter.ndim != 2:
+        raise ValueError("Gram matrix features require a 2-D parameter tensor")
+
+    parameter = parameter.detach()
+    grad = grad.detach()
+    momentum = momentum.detach()
+    second_moment = second_moment.detach()
+
+    rms = second_moment.clamp_min(0).add(eps).sqrt()
+    grad_gram = _normalized_gram_cubic(grad, eps=eps)
+    momentum_gram = _normalized_gram_cubic(momentum, eps=eps)
+    parameter_rms = parameter.square().mean().add(eps).sqrt()
+    progress = min(max(step / total_steps, 0.0), 1.0)
+
+    def flat(tensor: torch.Tensor) -> torch.Tensor:
+        return tensor.reshape(-1)
+
+    flat_grad = flat(grad)
+    return torch.stack(
+        (
+            flat_grad,
+            flat(momentum),
+            flat(rms),
+            flat(parameter),
+            flat(grad_gram),
+            flat(momentum_gram),
             parameter_rms.expand_as(flat_grad),
             torch.full_like(flat_grad, progress),
         ),
