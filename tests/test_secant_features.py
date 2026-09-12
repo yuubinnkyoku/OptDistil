@@ -64,6 +64,22 @@ def test_one_pair_lbfgs_recovers_isotropic_inverse_curvature_direction() -> None
     torch.testing.assert_close(cosine, torch.ones_like(cosine), rtol=1e-7, atol=1e-7)
 
 
+def test_raw_secant_direction_preserves_inverse_curvature_scale() -> None:
+    state = SecantFeatureState(normalize_direction=False)
+    hessian_scale = 4.0
+    parameter0 = torch.tensor([[1.0, -2.0], [0.5, 3.0]], dtype=torch.float64)
+    grad0 = hessian_scale * parameter0
+    zeros = torch.zeros_like(parameter0)
+    state.build(parameter0, grad0, zeros, grad0.square(), step=1, total_steps=4)
+
+    parameter1 = parameter0 - 0.1 * grad0
+    grad1 = hessian_scale * parameter1
+    features = state.build(parameter1, grad1, zeros, grad1.square(), step=2, total_steps=4)
+
+    direction = features[:, 5].reshape_as(grad1)
+    torch.testing.assert_close(direction, -grad1 / hessian_scale, rtol=1e-6, atol=1e-6)
+
+
 def test_multi_pair_history_stays_bounded_and_preserves_isotropic_direction() -> None:
     state = SecantFeatureState(history_size=2)
     hessian_scale = 3.0
