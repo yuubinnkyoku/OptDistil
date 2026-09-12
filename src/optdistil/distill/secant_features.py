@@ -11,13 +11,20 @@ class SecantFeatureState:
     direction by the standard L-BFGS two-loop recursion.
     """
 
-    def __init__(self, *, history_size: int = 1, eps: float = 1e-8) -> None:
+    def __init__(
+        self,
+        *,
+        history_size: int = 1,
+        eps: float = 1e-8,
+        normalize_direction: bool = True,
+    ) -> None:
         if history_size <= 0:
             raise ValueError("history_size must be positive")
         if eps <= 0.0:
             raise ValueError("eps must be positive")
         self.history_size = int(history_size)
         self.eps = float(eps)
+        self.normalize_direction = bool(normalize_direction)
         self.previous_parameter: torch.Tensor | None = None
         self.previous_grad: torch.Tensor | None = None
         self._s_history: list[torch.Tensor] = []
@@ -112,11 +119,12 @@ class SecantFeatureState:
 
         eps = self.eps
         direction = self._direction(parameter, grad)
-        # The feature carries direction rather than raw inverse-Hessian scale; downstream
-        # output-scale selection remains responsible for deployment step size.
-        grad_rms = grad.square().mean().add(eps).sqrt()
-        direction_rms = direction.square().mean().add(eps).sqrt()
-        direction = direction * (grad_rms / direction_rms)
+        if self.normalize_direction:
+            # Historical OptDistil behavior: retain only L-BFGS geometry while removing its
+            # inverse-curvature scale, leaving deployment step size to the downstream policy.
+            grad_rms = grad.square().mean().add(eps).sqrt()
+            direction_rms = direction.square().mean().add(eps).sqrt()
+            direction = direction * (grad_rms / direction_rms)
 
         rms = second_moment.clamp_min(0).add(eps).sqrt()
         row_grad_rms = grad.square().mean(dim=1, keepdim=True).add(eps).sqrt().expand_as(grad)
