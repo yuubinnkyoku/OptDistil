@@ -12,7 +12,7 @@ from optdistil.distill.secant_features import SecantFeatureState
 from optdistil.students.tiny_mlp import TinyMLPOptimizer
 
 Case = tuple[Tensor, OptimizationTask]
-SecantUpdateMode = Literal["full_update", "scalar_gain"]
+SecantUpdateMode = Literal["full_update", "scalar_gain", "bounded_gain"]
 
 
 @dataclass(frozen=True, slots=True)
@@ -23,17 +23,32 @@ class SecantMetaTrainStep:
     grad_norm: float
 
 
+def _bounded_gain_coordinate(
+    student: TinyMLPOptimizer,
+    features: Tensor,
+    *,
+    gain_bound: float,
+) -> Tensor:
+    raw = student.network(features).squeeze(-1).mean()
+    return gain_bound * torch.tanh(raw)
+
+
 def _student_update(
     student: TinyMLPOptimizer,
     features: Tensor,
     *,
     mode: SecantUpdateMode,
     gain_normalization: float,
+    gain_bound: float,
 ) -> Tensor:
     if mode == "full_update":
         return student(features)
     if mode == "scalar_gain":
         gain = gain_normalization * student(features).mean()
+        return gain * features[:, 5]
+    if mode == "bounded_gain":
+        coordinate = _bounded_gain_coordinate(student, features, gain_bound=gain_bound)
+        gain = student.output_scale * gain_normalization * torch.sinh(coordinate)
         return gain * features[:, 5]
     raise ValueError(f"unknown secant update mode: {mode}")
 
@@ -47,6 +62,7 @@ def differentiable_secant_student_rollout(
     history_size: int = 4,
     mode: SecantUpdateMode = "full_update",
     gain_normalization: float = 1.0,
+    gain_bound: float = 4.0,
     beta1: float = 0.9,
     beta2: float = 0.999,
     eps: float = 1e-12,
@@ -62,6 +78,8 @@ def differentiable_secant_student_rollout(
         raise ValueError("steps and history_size must be positive")
     if gain_normalization <= 0.0 or not math.isfinite(gain_normalization):
         raise ValueError("gain_normalization must be positive and finite")
+    if gain_bound <= 0.0 or not math.isfinite(gain_bound):
+        raise ValueError("gain_bound must be positive and finite")
 
     parameter = initial_parameter.detach().clone()
     momentum = torch.zeros_like(parameter)
@@ -88,6 +106,7 @@ def differentiable_secant_student_rollout(
             features,
             mode=mode,
             gain_normalization=gain_normalization,
+            gain_bound=gain_bound,
         ).reshape_as(parameter)
         parameter = parameter + update
         ratios.append(task.loss(parameter) / initial_loss)
@@ -103,6 +122,7 @@ def secant_meta_objective(
     history_size: int = 4,
     mode: SecantUpdateMode = "full_update",
     gain_normalization: float = 1.0,
+    gain_bound: float = 4.0,
     final_weight: float = 0.7,
 ) -> Tensor:
     if not cases:
@@ -120,6 +140,7 @@ def secant_meta_objective(
             history_size=history_size,
             mode=mode,
             gain_normalization=gain_normalization,
+            gain_bound=gain_bound,
         )
         objectives.append(final_weight * final_ratio + (1.0 - final_weight) * mean_ratio)
     return torch.stack(objectives).mean()
@@ -134,6 +155,7 @@ def evaluate_secant_meta_student(
     history_size: int = 4,
     mode: SecantUpdateMode = "full_update",
     gain_normalization: float = 1.0,
+    gain_bound: float = 4.0,
 ) -> float:
     if not cases:
         raise ValueError("at least one evaluation case is required")
@@ -165,6 +187,7 @@ def evaluate_secant_meta_student(
                 features,
                 mode=mode,
                 gain_normalization=gain_normalization,
+                gain_bound=gain_bound,
             ).reshape_as(parameter)
             parameter = parameter + update
             final_loss = float(task.loss(parameter))
@@ -189,6 +212,7 @@ def train_secant_meta_student(
     history_size: int = 4,
     mode: SecantUpdateMode = "full_update",
     gain_normalization: float = 1.0,
+    gain_bound: float = 4.0,
     iterations: int = 20,
     outer_lr: float = 1e-3,
     grad_clip: float = 1.0,
@@ -211,6 +235,7 @@ def train_secant_meta_student(
         history_size=history_size,
         mode=mode,
         gain_normalization=gain_normalization,
+        gain_bound=gain_bound,
     )
     best_state = _clone_state_dict(student)
     history: list[SecantMetaTrainStep] = []
@@ -225,6 +250,7 @@ def train_secant_meta_student(
             history_size=history_size,
             mode=mode,
             gain_normalization=gain_normalization,
+            gain_bound=gain_bound,
             final_weight=final_weight,
         )
         if not torch.isfinite(objective):
@@ -244,6 +270,7 @@ def train_secant_meta_student(
                 history_size=history_size,
                 mode=mode,
                 gain_normalization=gain_normalization,
+                gain_bound=gain_bound,
             )
             if validation_ratio < best_validation:
                 best_validation = validation_ratio
