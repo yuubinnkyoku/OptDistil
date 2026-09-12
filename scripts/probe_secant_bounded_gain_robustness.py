@@ -4,7 +4,6 @@ import argparse
 import json
 import math
 import statistics
-from copy import deepcopy
 from dataclasses import asdict, dataclass
 from pathlib import Path
 
