@@ -18,7 +18,6 @@ from probe_oracle_feature_bottleneck import (
 from probe_secant_history_pareto import (
     collect_secant_records,
     evaluate_secant_student,
-    rollout_secant_student,
     select_secant_scale,
 )
 
