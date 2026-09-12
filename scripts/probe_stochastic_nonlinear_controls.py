@@ -2,34 +2,25 @@ from __future__ import annotations
 
 import argparse
 import json
-import math
 import statistics
 from dataclasses import asdict, dataclass
 from pathlib import Path
 
 import torch
 
-from optdistil.distill.secant_features import SecantFeatureState
-from optdistil.students.tiny_mlp import StudentState
-from optdistil.tasks.frozen_readout_mlp import make_frozen_readout_mlp
-from optdistil.teachers.adamw import AdamWTeacher
-from optdistil.teachers.gradient_direction import GradientDirectionTeacher
-from optdistil.teachers.muon import MuonTeacher
-
-TRAIN_CONDITIONS = (30.0, 300.0)
-OOD_CONDITIONS = (10.0, 100.0, 1000.0, 3000.0)
-HISTORY_SIZE = 4
-DEFAULT_BATCH_SIZES = (4, 8, 16, 32, 64)
-TEACHER_LRS = (0.003, 0.01, 0.03, 0.06, 0.1, 0.2, 0.3, 0.5)
-SECANT_SCALES = (0.003, 0.01, 0.03, 0.06, 0.1, 0.2, 0.3, 0.5, 0.75, 1.0)
-BOOTSTRAP_SCALES = (0.01, 0.03, 0.06, 0.1, 0.2, 0.3, 0.5)
-
-
-@dataclass(frozen=True, slots=True)
-class StochasticCase:
-    initial: torch.Tensor
-    task: object
-    batch_seed: int
+from optdistil.distill.stochastic import (
+    DEFAULT_BATCH_SIZES,
+    OOD_CONDITIONS,
+    TRAIN_CONDITIONS,
+    StochasticCase,
+    batch_sequence,
+    evaluate_secant_split,
+    evaluate_teacher_split,
+    flatten_split,
+    make_split,
+    tune_secant,
+    tune_teacher_lr,
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -69,183 +60,6 @@ def apply_quick(args: argparse.Namespace) -> None:
     args.validation_tasks = 3
     args.iid_test_tasks = 4
     args.ood_test_tasks = 3
-
-
-def make_split(
-    conditions: tuple[float, ...],
-    *,
-    seed_base: int,
-    count: int,
-    size: int,
-    samples: int,
-    device: torch.device,
-) -> dict[float, list[StochasticCase]]:
-    split = {}
-    for condition_index, condition in enumerate(conditions):
-        cases = []
-        for index in range(count):
-            seed = seed_base + 10000 * condition_index + index
-            initial, task = make_frozen_readout_mlp(
-                seed,
-                hidden_dim=size,
-                input_dim=size,
-                output_dim=max(2, size // 2),
-                samples=samples,
-                input_condition=condition,
-                device=device,
-            )
-            cases.append(StochasticCase(initial, task, 1_000_000 + seed))
-        split[condition] = cases
-    return split
-
-
-def flatten(split) -> list[StochasticCase]:
-    return [case for cases in split.values() for case in cases]
-
-
-def batch_sequence(case: StochasticCase, *, batch_size: int, steps: int) -> list[torch.Tensor]:
-    sample_count = case.task.sample_count
-    if batch_size <= 0 or batch_size > sample_count:
-        raise ValueError("batch_size must lie in [1, sample_count]")
-    if batch_size == sample_count:
-        full = torch.arange(sample_count, dtype=torch.long)
-        return [full for _ in range(steps)]
-
-    generator = torch.Generator(device="cpu").manual_seed(case.batch_seed)
-    return [
-        torch.randperm(sample_count, generator=generator)[:batch_size]
-        for _ in range(steps)
-    ]
-
-
-def make_teacher(method: str, lr: float):
-    if method == "adamw":
-        return AdamWTeacher(lr=lr)
-    if method == "muon":
-        return MuonTeacher(lr=lr)
-    if method == "norm_gradient":
-        return GradientDirectionTeacher(lr=lr)
-    raise ValueError(f"unknown method: {method}")
-
-
-@torch.no_grad()
-def rollout_teacher(
-    method: str,
-    lr: float,
-    case: StochasticCase,
-    *,
-    batch_size: int,
-    steps: int,
-) -> float:
-    parameter = case.initial.detach().clone()
-    teacher = make_teacher(method, lr)
-    batches = batch_sequence(case, batch_size=batch_size, steps=steps)
-    initial_loss = float(case.task.loss(parameter))
-    for indices in batches:
-        grad = case.task.grad_on_samples(parameter, indices)
-        parameter = parameter + teacher.step(parameter, grad)
-        if not torch.isfinite(parameter).all():
-            return math.inf
-    final_loss = float(case.task.loss(parameter))
-    if not math.isfinite(final_loss):
-        return math.inf
-    return final_loss / max(abs(initial_loss), 1e-12)
-
-
-def tune_teacher(
-    method: str,
-    validation_cases: list[StochasticCase],
-    *,
-    batch_size: int,
-    steps: int,
-) -> tuple[float, float]:
-    scored = []
-    for lr in TEACHER_LRS:
-        score = statistics.fmean(
-            rollout_teacher(method, lr, case, batch_size=batch_size, steps=steps)
-            for case in validation_cases
-        )
-        scored.append((score, lr))
-    score, lr = min(scored, key=lambda item: item[0])
-    return lr, score
-
-
-@torch.no_grad()
-def rollout_secant(
-    case: StochasticCase,
-    *,
-    batch_size: int,
-    steps: int,
-    secant_scale: float,
-    bootstrap_scale: float,
-) -> float:
-    parameter = case.initial.detach().clone()
-    ema = StudentState(parameter.shape, device=parameter.device, dtype=parameter.dtype)
-    state = SecantFeatureState(history_size=HISTORY_SIZE, normalize_direction=False)
-    batches = batch_sequence(case, batch_size=batch_size, steps=steps)
-    initial_loss = float(case.task.loss(parameter))
-
-    for step, indices in enumerate(batches, start=1):
-        grad = case.task.grad_on_samples(parameter, indices)
-        momentum, second_moment = ema.observe(grad)
-        features = state.build(
-            parameter,
-            grad,
-            momentum,
-            second_moment,
-            step=step,
-            total_steps=steps,
-        )
-        if step == 1:
-            grad_rms = grad.square().mean().sqrt().clamp_min(1e-8)
-            update = -bootstrap_scale * grad / grad_rms
-        else:
-            update = secant_scale * features[:, 5].reshape_as(parameter)
-        parameter = parameter + update
-        if not torch.isfinite(parameter).all():
-            return math.inf
-
-    final_loss = float(case.task.loss(parameter))
-    if not math.isfinite(final_loss):
-        return math.inf
-    return final_loss / max(abs(initial_loss), 1e-12)
-
-
-def tune_secant(
-    validation_cases: list[StochasticCase],
-    *,
-    batch_size: int,
-    steps: int,
-) -> tuple[dict[str, float], float]:
-    scored = []
-    for bootstrap_scale in BOOTSTRAP_SCALES:
-        for secant_scale in SECANT_SCALES:
-            score = statistics.fmean(
-                rollout_secant(
-                    case,
-                    batch_size=batch_size,
-                    steps=steps,
-                    secant_scale=secant_scale,
-                    bootstrap_scale=bootstrap_scale,
-                )
-                for case in validation_cases
-            )
-            scored.append((score, bootstrap_scale, secant_scale))
-    score, bootstrap_scale, secant_scale = min(scored, key=lambda item: item[0])
-    return {
-        "bootstrap_scale": bootstrap_scale,
-        "secant_scale": secant_scale,
-    }, score
-
-
-def evaluate_split(split, rollout) -> tuple[float, dict[str, float]]:
-    by_condition = {}
-    ratios = []
-    for condition, cases in split.items():
-        condition_ratios = [rollout(case) for case in cases]
-        by_condition[str(condition)] = statistics.fmean(condition_ratios)
-        ratios.extend(condition_ratios)
-    return statistics.fmean(ratios), by_condition
 
 
 @torch.no_grad()
@@ -298,48 +112,44 @@ def main() -> None:
         samples=args.samples,
         device=device,
     )
-    validation_cases = flatten(validation)
+    validation_cases = flatten_split(validation)
 
-    batch_sizes = sorted({size for size in DEFAULT_BATCH_SIZES if size <= args.samples} | {args.samples})
+    batch_sizes = sorted(
+        {size for size in DEFAULT_BATCH_SIZES if size <= args.samples} | {args.samples}
+    )
     sweeps = {}
     for batch_size in batch_sizes:
         results: list[MethodResult] = []
         for method in ("adamw", "muon", "norm_gradient"):
-            lr, validation_score = tune_teacher(
-                method,
+            lr, validation_score = tune_teacher_lr(
+                method,  # type: ignore[arg-type]
                 validation_cases,
                 batch_size=batch_size,
                 steps=args.steps,
             )
-            iid, iid_by_condition = evaluate_split(
+            iid = evaluate_teacher_split(
+                method,  # type: ignore[arg-type]
+                lr,
                 iid_test,
-                lambda case, method=method, lr=lr, batch_size=batch_size: rollout_teacher(
-                    method,
-                    lr,
-                    case,
-                    batch_size=batch_size,
-                    steps=args.steps,
-                ),
+                batch_size=batch_size,
+                steps=args.steps,
             )
-            ood, ood_by_condition = evaluate_split(
+            ood = evaluate_teacher_split(
+                method,  # type: ignore[arg-type]
+                lr,
                 ood_test,
-                lambda case, method=method, lr=lr, batch_size=batch_size: rollout_teacher(
-                    method,
-                    lr,
-                    case,
-                    batch_size=batch_size,
-                    steps=args.steps,
-                ),
+                batch_size=batch_size,
+                steps=args.steps,
             )
             results.append(
                 MethodResult(
                     method=method,
                     validation_loss_ratio=validation_score,
                     tuning={"lr": lr},
-                    iid_loss_ratio=iid,
-                    ood_loss_ratio=ood,
-                    iid_by_condition=iid_by_condition,
-                    ood_by_condition=ood_by_condition,
+                    iid_loss_ratio=iid["loss_ratio"]["mean"],
+                    ood_loss_ratio=ood["loss_ratio"]["mean"],
+                    iid_by_condition=iid["by_condition"],
+                    ood_by_condition=ood["by_condition"],
                 )
             )
 
@@ -348,54 +158,51 @@ def main() -> None:
             batch_size=batch_size,
             steps=args.steps,
         )
-        iid, iid_by_condition = evaluate_split(
+        iid = evaluate_secant_split(
             iid_test,
-            lambda case, tuning=tuning, batch_size=batch_size: rollout_secant(
-                case,
-                batch_size=batch_size,
-                steps=args.steps,
-                secant_scale=tuning["secant_scale"],
-                bootstrap_scale=tuning["bootstrap_scale"],
-            ),
+            batch_size=batch_size,
+            steps=args.steps,
+            secant_scale=tuning["secant_scale"],
+            bootstrap_scale=tuning["bootstrap_scale"],
         )
-        ood, ood_by_condition = evaluate_split(
+        ood = evaluate_secant_split(
             ood_test,
-            lambda case, tuning=tuning, batch_size=batch_size: rollout_secant(
-                case,
-                batch_size=batch_size,
-                steps=args.steps,
-                secant_scale=tuning["secant_scale"],
-                bootstrap_scale=tuning["bootstrap_scale"],
-            ),
+            batch_size=batch_size,
+            steps=args.steps,
+            secant_scale=tuning["secant_scale"],
+            bootstrap_scale=tuning["bootstrap_scale"],
         )
         results.append(
             MethodResult(
                 method="raw_lbfgs_two_scale",
                 validation_loss_ratio=validation_score,
                 tuning=tuning,
-                iid_loss_ratio=iid,
-                ood_loss_ratio=ood,
-                iid_by_condition=iid_by_condition,
-                ood_by_condition=ood_by_condition,
+                iid_loss_ratio=iid["loss_ratio"]["mean"],
+                ood_loss_ratio=ood["loss_ratio"]["mean"],
+                iid_by_condition=iid["by_condition"],
+                ood_by_condition=ood["by_condition"],
             )
         )
 
         sweeps[str(batch_size)] = {
-            "gradient_noise_ratio": gradient_noise_ratio(validation_cases, batch_size=batch_size),
+            "gradient_noise_ratio": gradient_noise_ratio(
+                validation_cases, batch_size=batch_size
+            ),
             "results": [asdict(result) for result in results],
             "iid_ranking": [
-                result.method for result in sorted(results, key=lambda item: item.iid_loss_ratio)
+                result.method
+                for result in sorted(results, key=lambda item: item.iid_loss_ratio)
             ],
             "ood_ranking": [
-                result.method for result in sorted(results, key=lambda item: item.ood_loss_ratio)
+                result.method
+                for result in sorted(results, key=lambda item: item.ood_loss_ratio)
             ],
         }
 
     payload = {
         "config": vars(args) | {"output": str(args.output) if args.output else None},
-        "train_conditions": TRAIN_CONDITIONS,
-        "ood_conditions": OOD_CONDITIONS,
-        "history_size": HISTORY_SIZE,
+        "train_conditions": list(TRAIN_CONDITIONS),
+        "ood_conditions": list(OOD_CONDITIONS),
         "batch_sizes": batch_sizes,
         "sweeps": sweeps,
     }

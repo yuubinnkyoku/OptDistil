@@ -2,64 +2,70 @@ from __future__ import annotations
 
 import argparse
 import json
-import math
 import statistics
-from copy import deepcopy
-from dataclasses import asdict, dataclass
+import subprocess
+import uuid
 from pathlib import Path
+from typing import Any
 
 import torch
-from probe_stochastic_nonlinear_controls import (
+
+from optdistil.distill.experimental_features import (
+    build_hybrid_gram_features,
+    build_matrix_aware_no_ema,
+    build_matrix_aware_no_progress,
+)
+from optdistil.distill.features import (
+    build_elementwise_features,
+    build_gram_matrix_features,
+    build_matrix_aware_features,
+)
+from optdistil.distill.losses import DistillationLossWeights
+from optdistil.distill.stochastic import (
+    DEFAULT_BATCH_SIZES,
+    OOD_CONDITIONS,
+    TRAIN_CONDITIONS,
     StochasticCase,
-    batch_sequence,
+    batch_transfer_matrix,
+    clone_state_dict,
+    collect_stochastic_records,
+    evaluate_secant_split,
+    evaluate_student_split,
+    evaluate_teacher_split,
+    flatten_split,
     make_split,
-    rollout_secant,
-    rollout_teacher,
+    paired_differences,
+    select_outer_lr_and_train,
+    select_student_scale,
+    summarize_ratios,
+    train_direct_meta_student,
+    train_supervised_student,
     tune_secant,
-    tune_teacher,
+    tune_teacher_lr,
 )
 
-from optdistil.distill.features import build_matrix_aware_features
-from optdistil.distill.losses import DistillationLossWeights
-from optdistil.distill.train import train_student
-from optdistil.distill.trajectory import TrajectoryRecord
-from optdistil.students.tiny_mlp import StudentState, TinyMLPOptimizer
-from optdistil.teachers.adamw import AdamWTeacher
-from optdistil.teachers.gradient_direction import GradientDirectionTeacher
-
-TRAIN_CONDITIONS = (30.0, 300.0)
-OOD_CONDITIONS = (10.0, 100.0, 1000.0, 3000.0)
 REGIMES = (
     ("adamw_b32", "adamw", 32),
     ("norm_gradient_b8", "norm_gradient", 8),
 )
-STUDENT_SCALE_CANDIDATES = (0.03, 0.06, 0.1, 0.2, 0.3, 0.5, 0.75, 1.0, 1.5, 2.0, 3.0)
-OUTER_LR_CANDIDATES = (3e-4, 1e-3, 3e-3)
-DISTILL_WEIGHTS = DistillationLossWeights(direction=0.7, magnitude=0.3)
-
-
-@dataclass(frozen=True, slots=True)
-class StudentRun:
-    regime: str
-    teacher: str
-    batch_size: int
-    seed: int
-    mode: str
-    student_parameters: int
-    validation_scale: float
-    selected_outer_lr: float | None
-    meta_validation_loss_ratio: float | None
-    test_loss_ratio: float
-    test_by_condition: dict[str, float]
-    ood_loss_ratio: float
-    ood_by_condition: dict[str, float]
+JOINT_WEIGHTS = DistillationLossWeights(direction=0.7, magnitude=0.3)
+DIRECTION_ONLY_WEIGHTS = DistillationLossWeights(direction=1.0, magnitude=0.0)
+FEATURE_SETS = {
+    "matrix_aware": build_matrix_aware_features,
+    "elementwise": build_elementwise_features,
+    "gram_cubic": build_gram_matrix_features,
+    "hybrid_gram": build_hybrid_gram_features,
+    "no_ema": build_matrix_aware_no_ema,
+    "no_progress": build_matrix_aware_no_progress,
+}
+LABEL_CONTROLS = ("shuffle_tasks", "permute_coords", "norm_only", "random_unit")
 
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=(
-            "Distill stochastic AdamW and normalized-gradient teachers into the fixed 153p "
-            "matrix-aware Student, then compare supervised distillation and closed-loop meta refinement."
+            "Stochastic optimizer-distillation benchmark on FrozenReadoutMLP with "
+            "AdamW@batch32 and NormGrad@batch8 teacher regimes."
         )
     )
     parser.add_argument("--size", type=int, default=8)
@@ -76,8 +82,36 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--meta-iterations", type=int, default=15)
     parser.add_argument("--student-seeds", type=int, default=5)
     parser.add_argument("--student-seed", type=int, default=401000)
+    parser.add_argument("--control-seeds", type=int, default=3)
+    parser.add_argument("--ablation-seeds", type=int, default=3)
     parser.add_argument("--device", default="cpu")
+    parser.add_argument(
+        "--regime",
+        choices=[name for name, _, _ in REGIMES],
+        action="append",
+        help="Run only the named regime(s). Default: all regimes.",
+    )
     parser.add_argument("--quick", action="store_true")
+    parser.add_argument(
+        "--skip-controls",
+        action="store_true",
+        help="Skip negative-control label corruptions.",
+    )
+    parser.add_argument(
+        "--skip-ablations",
+        action="store_true",
+        help="Skip feature-family ablations.",
+    )
+    parser.add_argument(
+        "--skip-batch-transfer",
+        action="store_true",
+        help="Skip evaluation at batch sizes other than the training batch.",
+    )
+    parser.add_argument(
+        "--skip-main-students",
+        action="store_true",
+        help="Skip distilled/meta/direct-meta student modes; keep analytic, controls, ablations.",
+    )
     parser.add_argument("--output", type=Path)
     return parser.parse_args()
 
@@ -85,314 +119,595 @@ def parse_args() -> argparse.Namespace:
 def apply_quick(args: argparse.Namespace) -> None:
     if not args.quick:
         return
-    args.steps = 16
-    args.lr_validation_tasks = 3
-    args.distill_train_tasks = 3
-    args.scale_validation_tasks = 3
-    args.meta_train_tasks = 3
-    args.meta_validation_tasks = 3
-    args.test_tasks = 4
-    args.ood_test_tasks = 3
-    args.distill_epochs = 10
-    args.meta_iterations = 6
+    args.steps = 12
+    args.lr_validation_tasks = 2
+    args.distill_train_tasks = 2
+    args.scale_validation_tasks = 2
+    args.meta_train_tasks = 2
+    args.meta_validation_tasks = 2
+    args.test_tasks = 3
+    args.ood_test_tasks = 2
+    args.distill_epochs = 4
+    args.meta_iterations = 3
     args.student_seeds = 2
+    args.control_seeds = 1
+    args.ablation_seeds = 1
 
 
-def flatten(split) -> list[StochasticCase]:
-    return [case for cases in split.values() for case in cases]
-
-
-def make_teacher(method: str, lr: float):
-    if method == "adamw":
-        return AdamWTeacher(lr=lr)
-    if method == "norm_gradient":
-        return GradientDirectionTeacher(lr=lr)
-    raise ValueError(f"unsupported distillation teacher: {method}")
-
-
-@torch.no_grad()
-def collect_records(
-    method: str,
-    lr: float,
-    cases: list[StochasticCase],
-    *,
-    batch_size: int,
-    steps: int,
-) -> list[TrajectoryRecord]:
-    records: list[TrajectoryRecord] = []
-    for task_index, case in enumerate(cases):
-        parameter = case.initial.detach().clone()
-        teacher = make_teacher(method, lr)
-        student_state = StudentState(parameter.shape, device=parameter.device, dtype=parameter.dtype)
-        batches = batch_sequence(case, batch_size=batch_size, steps=steps)
-        for step, indices in enumerate(batches, start=1):
-            grad = case.task.grad_on_samples(parameter, indices)
-            momentum, second_moment = student_state.observe(grad)
-            features = build_matrix_aware_features(
-                parameter,
-                grad,
-                momentum,
-                second_moment,
-                step=step,
-                total_steps=steps,
-            )
-            update = teacher.step(parameter, grad).detach()
-            records.append(
-                TrajectoryRecord(
-                    features=features.detach(),
-                    teacher_update=update.reshape(-1),
-                    metadata={
-                        "teacher": method,
-                        "task_index": task_index,
-                        "step": step,
-                        "batch_size": batch_size,
-                        "full_loss_before": float(case.task.loss(parameter)),
-                    },
-                )
-            )
-            parameter = parameter + update
-    return records
-
-
-@torch.no_grad()
-def rollout_student(
-    student: TinyMLPOptimizer,
-    case: StochasticCase,
-    *,
-    batch_size: int,
-    steps: int,
-) -> float:
-    parameter = case.initial.detach().clone()
-    state = StudentState(parameter.shape, device=parameter.device, dtype=parameter.dtype)
-    batches = batch_sequence(case, batch_size=batch_size, steps=steps)
-    initial_loss = float(case.task.loss(parameter))
-    student.eval()
-    for step, indices in enumerate(batches, start=1):
-        grad = case.task.grad_on_samples(parameter, indices)
-        momentum, second_moment = state.observe(grad)
-        features = build_matrix_aware_features(
-            parameter,
-            grad,
-            momentum,
-            second_moment,
-            step=step,
-            total_steps=steps,
+def git_commit_sha() -> str:
+    try:
+        return (
+            subprocess.check_output(
+                ["git", "rev-parse", "HEAD"],
+                stderr=subprocess.DEVNULL,
+                text=True,
+            ).strip()
         )
-        parameter = parameter + student(features).reshape_as(parameter)
-        if not torch.isfinite(parameter).all():
-            return math.inf
-    final_loss = float(case.task.loss(parameter))
-    if not math.isfinite(final_loss):
-        return math.inf
-    return final_loss / max(abs(initial_loss), 1e-12)
+    except (subprocess.CalledProcessError, FileNotFoundError):
+        return "unknown"
 
 
-def evaluate_cases(
-    student: TinyMLPOptimizer,
-    cases: list[StochasticCase],
+def evaluate_student_bundle(
+    student: torch.nn.Module,
     *,
+    test_split: dict[float, list[StochasticCase]],
+    ood_split: dict[float, list[StochasticCase]],
     batch_size: int,
     steps: int,
-) -> float:
-    return statistics.fmean(
-        rollout_student(student, case, batch_size=batch_size, steps=steps) for case in cases
-    )
-
-
-def evaluate_split(student, split, *, batch_size: int, steps: int):
-    by_condition = {}
-    ratios = []
-    for condition, cases in split.items():
-        values = [rollout_student(student, case, batch_size=batch_size, steps=steps) for case in cases]
-        by_condition[str(condition)] = statistics.fmean(values)
-        ratios.extend(values)
-    return statistics.fmean(ratios), by_condition
-
-
-def select_student_scale(
-    student: TinyMLPOptimizer,
-    validation_cases: list[StochasticCase],
-    *,
-    batch_size: int,
-    steps: int,
-) -> tuple[float, float]:
-    scored = []
-    for scale in STUDENT_SCALE_CANDIDATES:
-        student.set_output_scale(scale)
-        score = evaluate_cases(
-            student,
-            validation_cases,
-            batch_size=batch_size,
-            steps=steps,
-        )
-        scored.append((score, scale))
-    score, scale = min(scored, key=lambda item: item[0])
-    student.set_output_scale(scale)
-    return scale, score
-
-
-def differentiable_rollout(
-    student: TinyMLPOptimizer,
-    case: StochasticCase,
-    *,
-    batch_size: int,
-    steps: int,
-) -> tuple[torch.Tensor, torch.Tensor]:
-    parameter = case.initial.detach().clone()
-    momentum = torch.zeros_like(parameter)
-    second_moment = torch.zeros_like(parameter)
-    batches = batch_sequence(case, batch_size=batch_size, steps=steps)
-    initial_loss = case.task.loss(parameter).detach().clamp_min(1e-12)
-    ratios = []
-
-    for step, indices in enumerate(batches, start=1):
-        grad = case.task.grad_on_samples(parameter, indices).detach()
-        momentum = 0.9 * momentum + 0.1 * grad
-        second_moment = 0.999 * second_moment + 0.001 * grad.square()
-        features = build_matrix_aware_features(
-            parameter,
-            grad,
-            momentum,
-            second_moment,
-            step=step,
-            total_steps=steps,
-        )
-        parameter = parameter + student(features).reshape_as(parameter)
-        ratios.append(case.task.loss(parameter) / initial_loss)
-    return ratios[-1], torch.stack(ratios).mean()
-
-
-def meta_objective(
-    student: TinyMLPOptimizer,
-    cases: list[StochasticCase],
-    *,
-    batch_size: int,
-    steps: int,
-    final_weight: float = 0.7,
-) -> torch.Tensor:
-    values = []
-    for case in cases:
-        final_ratio, mean_ratio = differentiable_rollout(
-            student,
-            case,
-            batch_size=batch_size,
-            steps=steps,
-        )
-        values.append(final_weight * final_ratio + (1.0 - final_weight) * mean_ratio)
-    return torch.stack(values).mean()
-
-
-def clone_state(student: TinyMLPOptimizer):
-    return {name: value.detach().clone() for name, value in student.state_dict().items()}
-
-
-def train_meta(
-    student: TinyMLPOptimizer,
-    train_cases: list[StochasticCase],
-    validation_cases: list[StochasticCase],
-    *,
-    batch_size: int,
-    steps: int,
-    iterations: int,
-    outer_lr: float,
-) -> float:
-    outer = torch.optim.Adam(student.parameters(), lr=outer_lr)
-    best_validation = evaluate_cases(
+    feature_builder,
+    reference: str,
+    reference_lr: float,
+) -> dict[str, Any]:
+    test_metrics = evaluate_student_split(
         student,
-        validation_cases,
+        test_split,
         batch_size=batch_size,
         steps=steps,
+        feature_builder=feature_builder,
+        reference=reference,  # type: ignore[arg-type]
+        reference_lr=reference_lr,
     )
-    best_state = clone_state(student)
-
-    for _ in range(iterations):
-        student.train()
-        outer.zero_grad(set_to_none=True)
-        objective = meta_objective(
-            student,
-            train_cases,
-            batch_size=batch_size,
-            steps=steps,
-        )
-        if not torch.isfinite(objective):
-            break
-        objective.backward()
-        grad_norm = torch.nn.utils.clip_grad_norm_(student.parameters(), 1.0)
-        if not torch.isfinite(grad_norm):
-            break
-        outer.step()
-        validation = evaluate_cases(
-            student,
-            validation_cases,
-            batch_size=batch_size,
-            steps=steps,
-        )
-        if validation < best_validation:
-            best_validation = validation
-            best_state = clone_state(student)
-
-    student.load_state_dict(best_state)
-    student.eval()
-    return best_validation
+    ood_metrics = evaluate_student_split(
+        student,
+        ood_split,
+        batch_size=batch_size,
+        steps=steps,
+        feature_builder=feature_builder,
+        reference=reference,  # type: ignore[arg-type]
+        reference_lr=reference_lr,
+    )
+    return {"test": test_metrics, "ood": ood_metrics}
 
 
-def select_meta_lr(
-    initial_state,
+def run_regime(
     *,
+    regime: str,
+    teacher_method: str,
+    batch_size: int,
+    args: argparse.Namespace,
     device: torch.device,
-    train_cases: list[StochasticCase],
-    validation_cases: list[StochasticCase],
-    batch_size: int,
-    steps: int,
-    iterations: int,
-) -> tuple[TinyMLPOptimizer, float, float]:
-    candidates = []
-    for outer_lr in OUTER_LR_CANDIDATES:
-        student = TinyMLPOptimizer().to(device)
-        student.load_state_dict(deepcopy(initial_state))
-        validation = train_meta(
-            student,
-            train_cases,
-            validation_cases,
+    splits: dict[str, dict[float, list[StochasticCase]]],
+    ood_split: dict[float, list[StochasticCase]],
+) -> dict[str, Any]:
+    lr_cases = flatten_split(splits["lr_validation"])
+    distill_cases = flatten_split(splits["distill"])
+    scale_validation_cases = flatten_split(splits["scale_validation"])
+    meta_train_cases = flatten_split(splits["meta_train"])
+    meta_validation_cases = flatten_split(splits["meta_validation"])
+    test_split = splits["test"]
+
+    tuned_lrs = {
+        method: tune_teacher_lr(
+            method,  # type: ignore[arg-type]
+            lr_cases,
             batch_size=batch_size,
-            steps=steps,
-            iterations=iterations,
-            outer_lr=outer_lr,
+            steps=args.steps,
+        )[0]
+        for method in ("adamw", "norm_gradient", "muon")
+    }
+    teacher_lr = tuned_lrs[teacher_method]
+
+    analytic_test = {
+        method: evaluate_teacher_split(
+            method,  # type: ignore[arg-type]
+            lr,
+            test_split,
+            batch_size=batch_size,
+            steps=args.steps,
         )
-        candidates.append((validation, outer_lr, student))
-    validation, outer_lr, student = min(candidates, key=lambda item: item[0])
-    return student, outer_lr, validation
+        for method, lr in tuned_lrs.items()
+    }
+    analytic_ood = {
+        method: evaluate_teacher_split(
+            method,  # type: ignore[arg-type]
+            lr,
+            ood_split,
+            batch_size=batch_size,
+            steps=args.steps,
+        )
+        for method, lr in tuned_lrs.items()
+    }
 
+    secant_tuning, secant_validation = tune_secant(
+        scale_validation_cases,
+        batch_size=batch_size,
+        steps=args.steps,
+    )
+    raw_lbfgs = {
+        "validation_loss_ratio": secant_validation,
+        "tuning": secant_tuning,
+        "test": evaluate_secant_split(
+            test_split,
+            batch_size=batch_size,
+            steps=args.steps,
+            secant_scale=secant_tuning["secant_scale"],
+            bootstrap_scale=secant_tuning["bootstrap_scale"],
+        ),
+        "ood": evaluate_secant_split(
+            ood_split,
+            batch_size=batch_size,
+            steps=args.steps,
+            secant_scale=secant_tuning["secant_scale"],
+            bootstrap_scale=secant_tuning["bootstrap_scale"],
+        ),
+    }
 
-def analytic_results(
-    split,
-    *,
-    methods: dict[str, float],
-    batch_size: int,
-    steps: int,
-):
-    result = {}
-    for method, lr in methods.items():
-        by_condition = {}
-        values = []
-        for condition, cases in split.items():
-            ratios = [
-                rollout_teacher(method, lr, case, batch_size=batch_size, steps=steps)
-                for case in cases
-            ]
-            by_condition[str(condition)] = statistics.fmean(ratios)
-            values.extend(ratios)
-        result[method] = {
-            "loss_ratio": statistics.fmean(values),
-            "by_condition": by_condition,
+    strongest_analytic_name = min(
+        analytic_test,
+        key=lambda name: analytic_test[name]["loss_ratio"]["mean"],
+    )
+    strongest_analytic_ratio = analytic_test[strongest_analytic_name]["loss_ratio"]["mean"]
+    teacher_test_ratio = analytic_test[teacher_method]["loss_ratio"]["mean"]
+
+    joint_records = collect_stochastic_records(
+        teacher_method,  # type: ignore[arg-type]
+        teacher_lr,
+        distill_cases,
+        batch_size=batch_size,
+        steps=args.steps,
+        feature_builder=build_matrix_aware_features,
+    )
+    direction_records = collect_stochastic_records(
+        teacher_method,  # type: ignore[arg-type]
+        teacher_lr,
+        distill_cases,
+        batch_size=batch_size,
+        steps=args.steps,
+        feature_builder=build_matrix_aware_features,
+    )
+
+    feature_builder = FEATURE_SETS["matrix_aware"]
+    runs: list[dict[str, Any]] = []
+    batch_transfer: dict[str, Any] | None = None
+    per_seed_test_ratios: dict[str, list[float]] = {
+        "distill_joint": [],
+        "distill_direction": [],
+        "distill_joint_meta": [],
+        "direct_meta": [],
+    }
+    per_seed_ood_ratios: dict[str, list[float]] = {key: [] for key in per_seed_test_ratios}
+
+    for seed_index in range(0 if args.skip_main_students else args.student_seeds):
+        seed = args.student_seed + seed_index
+
+        # 1) Supervised distillation, direction+magnitude.
+        joint_student, joint_train_loss = train_supervised_student(
+            joint_records,
+            device=device,
+            seed=seed,
+            epochs=args.distill_epochs,
+            weights=JOINT_WEIGHTS,
+        )
+        joint_scale, joint_scale_score = select_student_scale(
+            joint_student,
+            scale_validation_cases,
+            batch_size=batch_size,
+            steps=args.steps,
+            feature_builder=feature_builder,
+        )
+        joint_eval = evaluate_student_bundle(
+            joint_student,
+            test_split=test_split,
+            ood_split=ood_split,
+            batch_size=batch_size,
+            steps=args.steps,
+            feature_builder=feature_builder,
+            reference=teacher_method,
+            reference_lr=teacher_lr,
+        )
+        runs.append(
+            {
+                "mode": "distill_joint",
+                "seed": seed,
+                "student_parameters": joint_student.parameter_count,
+                "validation_scale": joint_scale,
+                "validation_scale_score": joint_scale_score,
+                "train_distillation_loss": joint_train_loss,
+                "test": joint_eval["test"],
+                "ood": joint_eval["ood"],
+            }
+        )
+        per_seed_test_ratios["distill_joint"].append(joint_eval["test"]["loss_ratio"]["mean"])
+        per_seed_ood_ratios["distill_joint"].append(joint_eval["ood"]["loss_ratio"]["mean"])
+
+        # 2) Supervised distillation, direction-only.
+        direction_student, direction_train_loss = train_supervised_student(
+            direction_records,
+            device=device,
+            seed=seed + 50_000,
+            epochs=args.distill_epochs,
+            weights=DIRECTION_ONLY_WEIGHTS,
+        )
+        direction_scale, direction_scale_score = select_student_scale(
+            direction_student,
+            scale_validation_cases,
+            batch_size=batch_size,
+            steps=args.steps,
+            feature_builder=feature_builder,
+        )
+        direction_eval = evaluate_student_bundle(
+            direction_student,
+            test_split=test_split,
+            ood_split=ood_split,
+            batch_size=batch_size,
+            steps=args.steps,
+            feature_builder=feature_builder,
+            reference=teacher_method,
+            reference_lr=teacher_lr,
+        )
+        runs.append(
+            {
+                "mode": "distill_direction",
+                "seed": seed,
+                "student_parameters": direction_student.parameter_count,
+                "validation_scale": direction_scale,
+                "validation_scale_score": direction_scale_score,
+                "train_distillation_loss": direction_train_loss,
+                "test": direction_eval["test"],
+                "ood": direction_eval["ood"],
+            }
+        )
+        per_seed_test_ratios["distill_direction"].append(
+            direction_eval["test"]["loss_ratio"]["mean"]
+        )
+        per_seed_ood_ratios["distill_direction"].append(
+            direction_eval["ood"]["loss_ratio"]["mean"]
+        )
+
+        # 3) Closed-loop meta-finetuning from the joint distilled student.
+        meta_state = clone_state_dict(joint_student)
+        meta_student, outer_lr, meta_validation = select_outer_lr_and_train(
+            meta_state,
+            device=device,
+            train_cases=meta_train_cases,
+            validation_cases=meta_validation_cases,
+            batch_size=batch_size,
+            steps=args.steps,
+            iterations=args.meta_iterations,
+            feature_builder=feature_builder,
+        )
+        meta_eval = evaluate_student_bundle(
+            meta_student,
+            test_split=test_split,
+            ood_split=ood_split,
+            batch_size=batch_size,
+            steps=args.steps,
+            feature_builder=feature_builder,
+            reference=teacher_method,
+            reference_lr=teacher_lr,
+        )
+        runs.append(
+            {
+                "mode": "distill_joint_meta",
+                "seed": seed,
+                "student_parameters": meta_student.parameter_count,
+                "validation_scale": meta_student.output_scale.item(),
+                "selected_outer_lr": outer_lr,
+                "meta_validation_loss_ratio": meta_validation,
+                "test": meta_eval["test"],
+                "ood": meta_eval["ood"],
+            }
+        )
+        per_seed_test_ratios["distill_joint_meta"].append(meta_eval["test"]["loss_ratio"]["mean"])
+        per_seed_ood_ratios["distill_joint_meta"].append(meta_eval["ood"]["loss_ratio"]["mean"])
+
+        # 4) Direct meta-trained student without distillation.
+        direct_student, direct_outer_lr, direct_validation = train_direct_meta_student(
+            meta_train_cases,
+            meta_validation_cases,
+            device=device,
+            batch_size=batch_size,
+            steps=args.steps,
+            iterations=args.meta_iterations,
+            feature_builder=feature_builder,
+            seed=seed + 70_000,
+        )
+        direct_scale, direct_scale_score = select_student_scale(
+            direct_student,
+            scale_validation_cases,
+            batch_size=batch_size,
+            steps=args.steps,
+            feature_builder=feature_builder,
+        )
+        direct_eval = evaluate_student_bundle(
+            direct_student,
+            test_split=test_split,
+            ood_split=ood_split,
+            batch_size=batch_size,
+            steps=args.steps,
+            feature_builder=feature_builder,
+            reference=teacher_method,
+            reference_lr=teacher_lr,
+        )
+        runs.append(
+            {
+                "mode": "direct_meta",
+                "seed": seed,
+                "student_parameters": direct_student.parameter_count,
+                "validation_scale": direct_scale,
+                "validation_scale_score": direct_scale_score,
+                "selected_outer_lr": direct_outer_lr,
+                "meta_validation_loss_ratio": direct_validation,
+                "test": direct_eval["test"],
+                "ood": direct_eval["ood"],
+            }
+        )
+        per_seed_test_ratios["direct_meta"].append(direct_eval["test"]["loss_ratio"]["mean"])
+        per_seed_ood_ratios["direct_meta"].append(direct_eval["ood"]["loss_ratio"]["mean"])
+
+        if seed_index == 0 and not args.skip_batch_transfer:
+            batch_transfer = {
+                "seed": seed,
+                "matrix": batch_transfer_matrix(
+                    joint_student,
+                    test_split,
+                    train_batch_size=batch_size,
+                    eval_batch_sizes=DEFAULT_BATCH_SIZES,
+                    steps=args.steps,
+                    feature_builder=feature_builder,
+                ),
+            }
+
+    if args.skip_batch_transfer:
+        batch_transfer = None
+
+    controls: dict[str, Any] = {}
+    if not args.skip_controls:
+        print(f"[stoch-distill] regime={regime} negative controls", flush=True)
+        for control_index, label_control in enumerate(LABEL_CONTROLS):
+            control_ratios_test = []
+            control_ratios_ood = []
+            for seed_index in range(args.control_seeds):
+                seed = args.student_seed + 200_000 + seed_index
+                controlled_records = collect_stochastic_records(
+                    teacher_method,  # type: ignore[arg-type]
+                    teacher_lr,
+                    distill_cases,
+                    batch_size=batch_size,
+                    steps=args.steps,
+                    feature_builder=feature_builder,
+                    label_control=label_control,  # type: ignore[arg-type]
+                    control_seed=seed + control_index,
+                )
+                student, _ = train_supervised_student(
+                    controlled_records,
+                    device=device,
+                    seed=seed,
+                    epochs=args.distill_epochs,
+                    weights=JOINT_WEIGHTS,
+                )
+                select_student_scale(
+                    student,
+                    scale_validation_cases,
+                    batch_size=batch_size,
+                    steps=args.steps,
+                    feature_builder=feature_builder,
+                )
+                test_eval = evaluate_student_split(
+                    student,
+                    test_split,
+                    batch_size=batch_size,
+                    steps=args.steps,
+                    feature_builder=feature_builder,
+                )
+                ood_eval = evaluate_student_split(
+                    student,
+                    ood_split,
+                    batch_size=batch_size,
+                    steps=args.steps,
+                    feature_builder=feature_builder,
+                )
+                control_ratios_test.append(test_eval["loss_ratio"]["mean"])
+                control_ratios_ood.append(ood_eval["loss_ratio"]["mean"])
+            controls[label_control] = {
+                "test": summarize_ratios(control_ratios_test).to_dict(),
+                "ood": summarize_ratios(control_ratios_ood).to_dict(),
+                "seeds": args.control_seeds,
+            }
+
+        # Analytic-baseline trajectory student: learn from the strongest non-teacher
+        # analytic optimizer instead of the regime teacher.
+        baseline_method = (
+            "norm_gradient" if teacher_method == "adamw" else "adamw"
+        )
+        baseline_lr = tuned_lrs[baseline_method]
+        baseline_records = collect_stochastic_records(
+            baseline_method,  # type: ignore[arg-type]
+            baseline_lr,
+            distill_cases,
+            batch_size=batch_size,
+            steps=args.steps,
+            feature_builder=feature_builder,
+        )
+        baseline_test = []
+        baseline_ood = []
+        for seed_index in range(args.control_seeds):
+            seed = args.student_seed + 250_000 + seed_index
+            student, _ = train_supervised_student(
+                baseline_records,
+                device=device,
+                seed=seed,
+                epochs=args.distill_epochs,
+                weights=JOINT_WEIGHTS,
+            )
+            select_student_scale(
+                student,
+                scale_validation_cases,
+                batch_size=batch_size,
+                steps=args.steps,
+                feature_builder=feature_builder,
+            )
+            baseline_test.append(
+                evaluate_student_split(
+                    student,
+                    test_split,
+                    batch_size=batch_size,
+                    steps=args.steps,
+                    feature_builder=feature_builder,
+                )["loss_ratio"]["mean"]
+            )
+            baseline_ood.append(
+                evaluate_student_split(
+                    student,
+                    ood_split,
+                    batch_size=batch_size,
+                    steps=args.steps,
+                    feature_builder=feature_builder,
+                )["loss_ratio"]["mean"]
+            )
+        controls["analytic_baseline_trajectory"] = {
+            "source_teacher": baseline_method,
+            "source_lr": baseline_lr,
+            "test": summarize_ratios(baseline_test).to_dict(),
+            "ood": summarize_ratios(baseline_ood).to_dict(),
+            "seeds": args.control_seeds,
         }
-    return result
+
+    ablations: dict[str, Any] = {}
+    if not args.skip_ablations:
+        print(f"[stoch-distill] regime={regime} feature ablations", flush=True)
+        for feature_name, builder in FEATURE_SETS.items():
+            print(f"[stoch-distill] regime={regime} ablation={feature_name}", flush=True)
+            ablation_test = []
+            ablation_ood = []
+            for seed_index in range(args.ablation_seeds):
+                seed = args.student_seed + 300_000 + seed_index
+                records = collect_stochastic_records(
+                    teacher_method,  # type: ignore[arg-type]
+                    teacher_lr,
+                    distill_cases,
+                    batch_size=batch_size,
+                    steps=args.steps,
+                    feature_builder=builder,
+                )
+                student, _ = train_supervised_student(
+                    records,
+                    device=device,
+                    seed=seed,
+                    epochs=args.distill_epochs,
+                    weights=JOINT_WEIGHTS,
+                )
+                select_student_scale(
+                    student,
+                    scale_validation_cases,
+                    batch_size=batch_size,
+                    steps=args.steps,
+                    feature_builder=builder,
+                )
+                ablation_test.append(
+                    evaluate_student_split(
+                        student,
+                        test_split,
+                        batch_size=batch_size,
+                        steps=args.steps,
+                        feature_builder=builder,
+                    )["loss_ratio"]["mean"]
+                )
+                ablation_ood.append(
+                    evaluate_student_split(
+                        student,
+                        ood_split,
+                        batch_size=batch_size,
+                        steps=args.steps,
+                        feature_builder=builder,
+                    )["loss_ratio"]["mean"]
+                )
+            ablations[feature_name] = {
+                "test": summarize_ratios(ablation_test).to_dict(),
+                "ood": summarize_ratios(ablation_ood).to_dict(),
+                "student_parameters": 153,
+                "seeds": args.ablation_seeds,
+            }
+
+    mode_summary = {}
+    for mode, test_values in per_seed_test_ratios.items():
+        ood_values = per_seed_ood_ratios[mode]
+        if not test_values:
+            continue
+        mode_summary[mode] = {
+            "test": summarize_ratios(test_values).to_dict(),
+            "ood": summarize_ratios(ood_values).to_dict(),
+            "fraction_beats_teacher_test": statistics.fmean(
+                float(value < teacher_test_ratio) for value in test_values
+            ),
+            "fraction_beats_strongest_analytic_test": statistics.fmean(
+                float(value < strongest_analytic_ratio) for value in test_values
+            ),
+        }
+
+    if all(not values for values in per_seed_test_ratios.values()):
+        paired: dict[str, Any] = {}
+    else:
+        paired = {
+            "meta_minus_distill_test": paired_differences(
+                per_seed_test_ratios["distill_joint_meta"],
+                per_seed_test_ratios["distill_joint"],
+            ),
+            "meta_minus_distill_ood": paired_differences(
+                per_seed_ood_ratios["distill_joint_meta"],
+                per_seed_ood_ratios["distill_joint"],
+            ),
+            "distill_minus_direct_meta_test": paired_differences(
+                per_seed_test_ratios["distill_joint"],
+                per_seed_test_ratios["direct_meta"],
+            ),
+            "distill_minus_direct_meta_ood": paired_differences(
+                per_seed_ood_ratios["distill_joint"],
+                per_seed_ood_ratios["direct_meta"],
+            ),
+            "direction_minus_joint_test": paired_differences(
+                per_seed_test_ratios["distill_direction"],
+                per_seed_test_ratios["distill_joint"],
+            ),
+        }
+
+    return {
+        "teacher_method": teacher_method,
+        "batch_size": batch_size,
+        "tuned_lrs": tuned_lrs,
+        "teacher_lr": teacher_lr,
+        "train_records": len(joint_records),
+        "analytic_test": analytic_test,
+        "analytic_ood": analytic_ood,
+        "raw_lbfgs_two_scale": raw_lbfgs,
+        "strongest_analytic_test": {
+            "name": strongest_analytic_name,
+            "loss_ratio_mean": strongest_analytic_ratio,
+        },
+        "teacher_test_loss_ratio_mean": teacher_test_ratio,
+        "runs": runs,
+        "mode_summary": mode_summary,
+        "paired": paired,
+        "batch_transfer": batch_transfer,
+        "negative_controls": controls,
+        "feature_ablations": ablations,
+    }
 
 
 def main() -> None:
     args = parse_args()
     apply_quick(args)
-    if min(
+    positive_fields = (
         args.size,
         args.samples,
         args.steps,
@@ -406,10 +721,16 @@ def main() -> None:
         args.distill_epochs,
         args.meta_iterations,
         args.student_seeds,
-    ) <= 0:
+        args.control_seeds,
+        args.ablation_seeds,
+    )
+    if min(positive_fields) <= 0:
         raise ValueError("all dimensions, task counts, epochs, iterations, and seed counts must be positive")
 
     device = torch.device(args.device)
+    run_id = f"stoch-distill-{uuid.uuid4().hex[:12]}"
+    commit_sha = git_commit_sha()
+
     split_specs = {
         "lr_validation": (411000, args.lr_validation_tasks),
         "distill": (421000, args.distill_train_tasks),
@@ -438,224 +759,36 @@ def main() -> None:
         device=device,
     )
 
-    lr_cases = flatten(splits["lr_validation"])
-    distill_cases = flatten(splits["distill"])
-    scale_validation_cases = flatten(splits["scale_validation"])
-    meta_train_cases = flatten(splits["meta_train"])
-    meta_validation_cases = flatten(splits["meta_validation"])
-
-    payload_regimes = {}
-    all_runs: list[StudentRun] = []
-    for regime_index, (regime, teacher_method, batch_size) in enumerate(REGIMES):
-        tuned_lrs = {
-            method: tune_teacher(
-                method,
-                lr_cases,
-                batch_size=batch_size,
-                steps=args.steps,
-            )[0]
-            for method in ("adamw", "norm_gradient")
-        }
-        records = collect_records(
-            teacher_method,
-            tuned_lrs[teacher_method],
-            distill_cases,
+    regimes = {}
+    selected = [item for item in REGIMES if not args.regime or item[0] in set(args.regime)]
+    for regime, teacher_method, batch_size in selected:
+        print(f"[stoch-distill] start regime={regime}", flush=True)
+        regimes[regime] = run_regime(
+            regime=regime,
+            teacher_method=teacher_method,
             batch_size=batch_size,
-            steps=args.steps,
+            args=args,
+            device=device,
+            splits=splits,
+            ood_split=ood_split,
         )
-        secant_tuning, secant_validation = tune_secant(
-            scale_validation_cases,
-            batch_size=batch_size,
-            steps=args.steps,
-        )
-
-        for seed_index in range(args.student_seeds):
-            seed = args.student_seed + 1000 * regime_index + seed_index
-            torch.manual_seed(seed)
-            student = TinyMLPOptimizer().to(device)
-            train_student(
-                student,
-                records,
-                epochs=args.distill_epochs,
-                lr=3e-3,
-                weights=DISTILL_WEIGHTS,
-            )
-            scale, _ = select_student_scale(
-                student,
-                scale_validation_cases,
-                batch_size=batch_size,
-                steps=args.steps,
-            )
-            test_ratio, test_by_condition = evaluate_split(
-                student,
-                splits["test"],
-                batch_size=batch_size,
-                steps=args.steps,
-            )
-            ood_ratio, ood_by_condition = evaluate_split(
-                student,
-                ood_split,
-                batch_size=batch_size,
-                steps=args.steps,
-            )
-            all_runs.append(
-                StudentRun(
-                    regime=regime,
-                    teacher=teacher_method,
-                    batch_size=batch_size,
-                    seed=seed,
-                    mode="distill_only",
-                    student_parameters=student.parameter_count,
-                    validation_scale=scale,
-                    selected_outer_lr=None,
-                    meta_validation_loss_ratio=None,
-                    test_loss_ratio=test_ratio,
-                    test_by_condition=test_by_condition,
-                    ood_loss_ratio=ood_ratio,
-                    ood_by_condition=ood_by_condition,
-                )
-            )
-
-            meta_student, outer_lr, meta_validation = select_meta_lr(
-                clone_state(student),
-                device=device,
-                train_cases=meta_train_cases,
-                validation_cases=meta_validation_cases,
-                batch_size=batch_size,
-                steps=args.steps,
-                iterations=args.meta_iterations,
-            )
-            meta_test, meta_test_by_condition = evaluate_split(
-                meta_student,
-                splits["test"],
-                batch_size=batch_size,
-                steps=args.steps,
-            )
-            meta_ood, meta_ood_by_condition = evaluate_split(
-                meta_student,
-                ood_split,
-                batch_size=batch_size,
-                steps=args.steps,
-            )
-            all_runs.append(
-                StudentRun(
-                    regime=regime,
-                    teacher=teacher_method,
-                    batch_size=batch_size,
-                    seed=seed,
-                    mode="distill_meta",
-                    student_parameters=meta_student.parameter_count,
-                    validation_scale=scale,
-                    selected_outer_lr=outer_lr,
-                    meta_validation_loss_ratio=meta_validation,
-                    test_loss_ratio=meta_test,
-                    test_by_condition=meta_test_by_condition,
-                    ood_loss_ratio=meta_ood,
-                    ood_by_condition=meta_ood_by_condition,
-                )
-            )
-
-        test_analytic = analytic_results(
-            splits["test"],
-            methods=tuned_lrs,
-            batch_size=batch_size,
-            steps=args.steps,
-        )
-        ood_analytic = analytic_results(
-            ood_split,
-            methods=tuned_lrs,
-            batch_size=batch_size,
-            steps=args.steps,
-        )
-        secant_test_by_condition = {}
-        secant_test_values = []
-        for condition, cases in splits["test"].items():
-            values = [
-                rollout_secant(
-                    case,
-                    batch_size=batch_size,
-                    steps=args.steps,
-                    secant_scale=secant_tuning["secant_scale"],
-                    bootstrap_scale=secant_tuning["bootstrap_scale"],
-                )
-                for case in cases
-            ]
-            secant_test_by_condition[str(condition)] = statistics.fmean(values)
-            secant_test_values.extend(values)
-        secant_ood_by_condition = {}
-        secant_ood_values = []
-        for condition, cases in ood_split.items():
-            values = [
-                rollout_secant(
-                    case,
-                    batch_size=batch_size,
-                    steps=args.steps,
-                    secant_scale=secant_tuning["secant_scale"],
-                    bootstrap_scale=secant_tuning["bootstrap_scale"],
-                )
-                for case in cases
-            ]
-            secant_ood_by_condition[str(condition)] = statistics.fmean(values)
-            secant_ood_values.extend(values)
-
-        payload_regimes[regime] = {
-            "teacher": teacher_method,
-            "batch_size": batch_size,
-            "tuned_lrs": tuned_lrs,
-            "train_records": len(records),
-            "analytic_test": test_analytic,
-            "analytic_ood": ood_analytic,
-            "raw_lbfgs_two_scale": {
-                "validation_loss_ratio": secant_validation,
-                "tuning": secant_tuning,
-                "test_loss_ratio": statistics.fmean(secant_test_values),
-                "test_by_condition": secant_test_by_condition,
-                "ood_loss_ratio": statistics.fmean(secant_ood_values),
-                "ood_by_condition": secant_ood_by_condition,
-            },
-        }
-
-    summary = {}
-    paired = {}
-    for regime, _, _ in REGIMES:
-        regime_runs = [run for run in all_runs if run.regime == regime]
-        summary[regime] = {}
-        for mode in ("distill_only", "distill_meta"):
-            group = [run for run in regime_runs if run.mode == mode]
-            tests = [run.test_loss_ratio for run in group]
-            oods = [run.ood_loss_ratio for run in group]
-            summary[regime][mode] = {
-                "student_parameters": group[0].student_parameters,
-                "test_mean": statistics.fmean(tests),
-                "test_median": statistics.median(tests),
-                "test_seed_std": statistics.pstdev(tests),
-                "ood_mean": statistics.fmean(oods),
-                "ood_median": statistics.median(oods),
-                "ood_seed_std": statistics.pstdev(oods),
-                "validation_scale_mean": statistics.fmean(run.validation_scale for run in group),
-            }
-        distill = {run.seed: run for run in regime_runs if run.mode == "distill_only"}
-        meta = {run.seed: run for run in regime_runs if run.mode == "distill_meta"}
-        test_deltas = [meta[seed].test_loss_ratio - distill[seed].test_loss_ratio for seed in distill]
-        ood_deltas = [meta[seed].ood_loss_ratio - distill[seed].ood_loss_ratio for seed in distill]
-        paired[regime] = {
-            "meta_beats_distill_test_seeds": sum(delta < 0.0 for delta in test_deltas),
-            "meta_minus_distill_test_mean_delta": statistics.fmean(test_deltas),
-            "meta_beats_distill_ood_seeds": sum(delta < 0.0 for delta in ood_deltas),
-            "meta_minus_distill_ood_mean_delta": statistics.fmean(ood_deltas),
-            "total_seeds": len(test_deltas),
-        }
+        print(f"[stoch-distill] done regime={regime}", flush=True)
 
     payload = {
-        "config": vars(args) | {"output": str(args.output) if args.output else None},
-        "train_conditions": TRAIN_CONDITIONS,
-        "ood_conditions": OOD_CONDITIONS,
-        "distillation_weights": asdict(DISTILL_WEIGHTS),
-        "regimes": payload_regimes,
-        "runs": [asdict(run) for run in all_runs],
-        "summary": summary,
-        "paired": paired,
-        "student_parameters": 153,
+        "run_id": run_id,
+        "commit_sha": commit_sha,
+        "experiment": "stochastic_optimizer_distillation",
+        "config": {
+            **{key: value for key, value in vars(args).items() if key != "output"},
+            "output": str(args.output) if args.output else None,
+            "device": str(device),
+        },
+        "train_conditions": list(TRAIN_CONDITIONS),
+        "ood_conditions": list(OOD_CONDITIONS),
+        "split_specs": split_specs,
+        "ood_split_seed_base": 471000,
+        "student_parameter_count": 153,
+        "regimes": regimes,
     }
     text = json.dumps(payload, indent=2, sort_keys=True)
     print(text)
