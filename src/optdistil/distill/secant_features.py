@@ -6,7 +6,7 @@ import torch
 class SecantFeatureState:
     """One-pair L-BFGS feature state for a fixed-size tiny optimizer.
 
-    The state stores only the previous parameter and gradient.  It adds no trainable
+    The state stores only the previous parameter and gradient. It adds no trainable
     parameters and constructs a curvature-aware descent direction from the latest secant
     pair using reductions and elementwise vector operations.
     """
@@ -28,21 +28,26 @@ class SecantFeatureState:
         if self.previous_parameter.shape != parameter.shape or self.previous_grad.shape != grad.shape:
             raise ValueError("secant state shape changed")
 
-        s = (parameter - self.previous_parameter).reshape(-1)
-        y = (grad - self.previous_grad).reshape(-1)
-        g = grad.reshape(-1)
-        sy = torch.dot(s.float(), y.float())
-        yy = torch.dot(y.float(), y.float())
+        s = (parameter - self.previous_parameter).reshape(-1).float()
+        y = (grad - self.previous_grad).reshape(-1).float()
+        g = grad.reshape(-1).float()
+        sy = torch.dot(s, y)
+        yy = torch.dot(y, y)
         if not torch.isfinite(sy) or not torch.isfinite(yy):
             return -grad
         if float(sy) <= self.eps or float(yy) <= self.eps:
             return -grad
 
+        # Standard one-pair L-BFGS two-loop recursion. For H=hI this recovers H^{-1}g
+        # exactly after one valid secant pair.
         rho = sy.reciprocal()
+        alpha = rho * torch.dot(s, g)
+        q = g - alpha * y
         gamma = sy / yy
-        q = g.float() - rho * y.float() * torch.dot(s.float(), g.float())
         r = gamma * q
-        r = r + s.float() * (rho * torch.dot(y.float(), r))
+        beta = rho * torch.dot(y, r)
+        r = r + s * (alpha - beta)
+
         direction = -r.reshape_as(grad).to(dtype=grad.dtype, device=grad.device)
         if not torch.isfinite(direction).all():
             return -grad
