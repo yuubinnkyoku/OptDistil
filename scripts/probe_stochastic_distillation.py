@@ -10,8 +10,6 @@ from pathlib import Path
 
 import torch
 from probe_stochastic_nonlinear_controls import (
-    BOOTSTRAP_SCALES,
-    SECANT_SCALES,
     StochasticCase,
     batch_sequence,
     make_split,
