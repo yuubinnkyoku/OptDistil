@@ -4,7 +4,7 @@ import argparse
 import json
 import math
 import statistics
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from pathlib import Path
 
 import torch
@@ -252,8 +252,8 @@ def main() -> None:
         ("raw_global", raw_validation, None, raw_scale, False),
         ("raw_two_scale", two_validation, bootstrap_scale, two_secant_scale, False),
     ):
-        rollout = lambda initial, task, normalize=normalize, bootstrap=bootstrap, secant=secant: (
-            rollout_fixed_policy(
+        def rollout(initial, task, *, normalize=normalize, bootstrap=bootstrap, secant=secant):
+            return rollout_fixed_policy(
                 initial,
                 task,
                 steps=args.steps,
@@ -261,7 +261,7 @@ def main() -> None:
                 secant_scale=secant,
                 bootstrap_scale=bootstrap,
             )
-        )
+
         iid_ratio, iid_by_condition = evaluate_split(iid_test, rollout)
         ood_ratio, ood_by_condition = evaluate_split(ood_test, rollout)
         policies.append(
@@ -291,7 +291,7 @@ def main() -> None:
         "train_conditions": TRAIN_CONDITIONS,
         "ood_conditions": OOD_CONDITIONS,
         "history_size": HISTORY_SIZE,
-        "policies": [result.__dict__ for result in policies],
+        "policies": [asdict(result) for result in policies],
         "exact_line_search_oracle": {
             "iid_loss_ratio": oracle_iid,
             "ood_loss_ratio": oracle_ood,
