@@ -15,7 +15,12 @@ def make_case():
     return initial, CoupledMatrixQuadraticTask(target, left, right)
 
 
-def assert_finite_meta_gradients(mode: str, gain_normalization: float) -> None:
+def assert_finite_meta_gradients(
+    mode: str,
+    gain_normalization: float,
+    *,
+    gain_bound: float = 4.0,
+) -> None:
     torch.manual_seed(7)
     student = TinyMLPOptimizer().to(dtype=torch.float64)
     objective = secant_meta_objective(
@@ -25,6 +30,7 @@ def assert_finite_meta_gradients(mode: str, gain_normalization: float) -> None:
         history_size=2,
         mode=mode,
         gain_normalization=gain_normalization,
+        gain_bound=gain_bound,
     )
     assert torch.isfinite(objective)
     objective.backward()
@@ -40,3 +46,7 @@ def test_full_update_secant_meta_gradient_is_finite() -> None:
 
 def test_scalar_gain_secant_meta_gradient_is_finite() -> None:
     assert_finite_meta_gradients("scalar_gain", 0.01)
+
+
+def test_bounded_gain_secant_meta_gradient_is_finite() -> None:
+    assert_finite_meta_gradients("bounded_gain", 0.01, gain_bound=4.0)
