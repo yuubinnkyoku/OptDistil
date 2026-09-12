@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import torch
 
+from optdistil.distill.features import build_matrix_aware_features
+
 
 def _validate(
     parameter: torch.Tensor,
@@ -80,3 +82,52 @@ def build_hybrid_gram_features(
         ),
         dim=-1,
     )
+
+
+def build_matrix_aware_no_ema(
+    parameter: torch.Tensor,
+    grad: torch.Tensor,
+    momentum: torch.Tensor,
+    second_moment: torch.Tensor,
+    *,
+    step: int,
+    total_steps: int,
+    eps: float = 1e-8,
+) -> torch.Tensor:
+    """Matrix-aware features with momentum/RMS channels zeroed, still 8-wide."""
+    features = build_matrix_aware_features(
+        parameter,
+        grad,
+        momentum,
+        second_moment,
+        step=step,
+        total_steps=total_steps,
+        eps=eps,
+    ).clone()
+    features[:, 1] = 0.0
+    features[:, 2] = 0.0
+    return features
+
+
+def build_matrix_aware_no_progress(
+    parameter: torch.Tensor,
+    grad: torch.Tensor,
+    momentum: torch.Tensor,
+    second_moment: torch.Tensor,
+    *,
+    step: int,
+    total_steps: int,
+    eps: float = 1e-8,
+) -> torch.Tensor:
+    """Matrix-aware features with the training-progress channel zeroed, still 8-wide."""
+    features = build_matrix_aware_features(
+        parameter,
+        grad,
+        momentum,
+        second_moment,
+        step=step,
+        total_steps=total_steps,
+        eps=eps,
+    ).clone()
+    features[:, 7] = 0.0
+    return features
