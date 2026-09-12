@@ -313,7 +313,7 @@ def main() -> None:
             )
             iid, iid_by_condition = evaluate_split(
                 iid_test,
-                lambda case, method=method, lr=lr: rollout_teacher(
+                lambda case, method=method, lr=lr, batch_size=batch_size: rollout_teacher(
                     method,
                     lr,
                     case,
@@ -323,7 +323,7 @@ def main() -> None:
             )
             ood, ood_by_condition = evaluate_split(
                 ood_test,
-                lambda case, method=method, lr=lr: rollout_teacher(
+                lambda case, method=method, lr=lr, batch_size=batch_size: rollout_teacher(
                     method,
                     lr,
                     case,
@@ -350,7 +350,7 @@ def main() -> None:
         )
         iid, iid_by_condition = evaluate_split(
             iid_test,
-            lambda case, tuning=tuning: rollout_secant(
+            lambda case, tuning=tuning, batch_size=batch_size: rollout_secant(
                 case,
                 batch_size=batch_size,
                 steps=args.steps,
@@ -360,7 +360,7 @@ def main() -> None:
         )
         ood, ood_by_condition = evaluate_split(
             ood_test,
-            lambda case, tuning=tuning: rollout_secant(
+            lambda case, tuning=tuning, batch_size=batch_size: rollout_secant(
                 case,
                 batch_size=batch_size,
                 steps=args.steps,
