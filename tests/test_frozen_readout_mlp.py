@@ -19,6 +19,36 @@ def test_analytic_gradient_matches_autograd() -> None:
     torch.testing.assert_close(task.grad(parameter.detach()), autograd_gradient, rtol=1e-9, atol=1e-10)
 
 
+def test_minibatch_analytic_gradient_matches_autograd() -> None:
+    initial, task = make_frozen_readout_mlp(
+        19,
+        hidden_dim=4,
+        input_dim=3,
+        output_dim=2,
+        samples=13,
+        input_condition=50.0,
+        dtype=torch.float64,
+    )
+    indices = torch.tensor([0, 3, 5, 9], dtype=torch.long)
+    parameter = initial.detach().clone().requires_grad_(True)
+    autograd_gradient = torch.autograd.grad(task.loss_on_samples(parameter, indices), parameter)[0]
+
+    torch.testing.assert_close(
+        task.grad_on_samples(parameter.detach(), indices),
+        autograd_gradient,
+        rtol=1e-9,
+        atol=1e-10,
+    )
+
+
+def test_full_sample_minibatch_matches_full_objective() -> None:
+    initial, task = make_frozen_readout_mlp(21, samples=16, dtype=torch.float64)
+    indices = torch.arange(task.sample_count, dtype=torch.long)
+
+    torch.testing.assert_close(task.loss_on_samples(initial, indices), task.loss(initial))
+    torch.testing.assert_close(task.grad_on_samples(initial, indices), task.grad(initial))
+
+
 def test_factory_is_deterministic_and_condition_changes_task() -> None:
     initial_a, task_a = make_frozen_readout_mlp(23, input_condition=10.0)
     initial_b, task_b = make_frozen_readout_mlp(23, input_condition=10.0)
