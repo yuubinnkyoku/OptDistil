@@ -1,0 +1,41 @@
+name: secant-scalar-gain-control
+
+on:
+  push:
+    branches:
+      - experiment/contextual-teacher
+    paths:
+      - "scripts/probe_secant_scalar_gain_control.py"
+      - ".github/workflows/secant-scalar-gain-control.yml"
+  workflow_dispatch:
+
+concurrency:
+  group: secant-scalar-gain-control-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  compare:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - name: Install uv
+        uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9 # v9.0.0
+        with:
+          version: "0.12.10"
+          python-version: "3.11"
+          enable-cache: true
+      - name: Sync CPU environment
+        run: uv sync --locked --extra cpu
+      - name: Ruff
+        run: uv run --locked --extra cpu ruff check scripts/probe_secant_scalar_gain_control.py
+      - name: Scalar-gain control quick probe
+        run: >-
+          uv run --locked --extra cpu python scripts/probe_secant_scalar_gain_control.py
+          --quick --output artifacts/secant-scalar-gain-control.json
+      - name: Upload metrics
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: secant-scalar-gain-control
+          path: artifacts/secant-scalar-gain-control.json
+          if-no-files-found: ignore
