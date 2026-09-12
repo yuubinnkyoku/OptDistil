@@ -57,8 +57,52 @@ def test_one_pair_lbfgs_recovers_isotropic_inverse_curvature_direction() -> None
     grad1 = hessian_scale * parameter1
     features = state.build(parameter1, grad1, zeros, grad1.square(), step=2, total_steps=4)
 
-    # The raw one-pair L-BFGS direction is -g / h for H=hI.  The feature rescales it to
-    # the gradient RMS, so it must remain exactly parallel to -g.
     direction = features[:, 5].reshape_as(grad1)
-    cosine = torch.nn.functional.cosine_similarity(direction.reshape(1, -1), (-grad1).reshape(1, -1))
+    cosine = torch.nn.functional.cosine_similarity(
+        direction.reshape(1, -1), (-grad1).reshape(1, -1)
+    )
     torch.testing.assert_close(cosine, torch.ones_like(cosine), rtol=1e-7, atol=1e-7)
+
+
+def test_multi_pair_history_stays_bounded_and_preserves_isotropic_direction() -> None:
+    state = SecantFeatureState(history_size=2)
+    hessian_scale = 3.0
+    parameter = torch.tensor([[1.0, -0.5], [2.0, -1.0]], dtype=torch.float64)
+    zeros = torch.zeros_like(parameter)
+
+    for step in range(1, 6):
+        grad = hessian_scale * parameter
+        features = state.build(
+            parameter,
+            grad,
+            zeros,
+            grad.square(),
+            step=step,
+            total_steps=5,
+        )
+        direction = features[:, 5].reshape_as(grad)
+        cosine = torch.nn.functional.cosine_similarity(
+            direction.reshape(1, -1), (-grad).reshape(1, -1)
+        )
+        torch.testing.assert_close(cosine, torch.ones_like(cosine), rtol=1e-7, atol=1e-7)
+        parameter = parameter - 0.1 * grad
+
+    assert state.stored_pairs == 2
+    assert state.max_additional_state_tensors == 6
+
+
+def test_reset_clears_secant_history() -> None:
+    state = SecantFeatureState(history_size=4)
+    parameter = torch.ones((2, 2))
+    grad = 2.0 * parameter
+    zeros = torch.zeros_like(parameter)
+    state.build(parameter, grad, zeros, grad.square(), step=1, total_steps=3)
+    parameter = parameter - 0.1 * grad
+    grad = 2.0 * parameter
+    state.build(parameter, grad, zeros, grad.square(), step=2, total_steps=3)
+    assert state.stored_pairs == 1
+
+    state.reset()
+    assert state.stored_pairs == 0
+    assert state.previous_parameter is None
+    assert state.previous_grad is None
