@@ -39,27 +39,64 @@ class FrozenReadoutMLPTask:
     def parameter_shape(self) -> tuple[int, int]:
         return self.readout.shape[1], self.inputs.shape[0]
 
+    @property
+    def sample_count(self) -> int:
+        return self.inputs.shape[1]
+
     def _validate_parameter(self, parameter: Tensor) -> None:
         if tuple(parameter.shape) != self.parameter_shape:
             raise ValueError(f"parameter must have shape {self.parameter_shape}")
+
+    def _sample_view(self, sample_indices: Tensor) -> tuple[Tensor, Tensor]:
+        if sample_indices.ndim != 1 or sample_indices.numel() <= 0:
+            raise ValueError("sample_indices must be a non-empty 1-D tensor")
+        if sample_indices.dtype != torch.long:
+            raise ValueError("sample_indices must use torch.long dtype")
+        indices = sample_indices.to(device=self.inputs.device)
+        if int(indices.min()) < 0 or int(indices.max()) >= self.sample_count:
+            raise ValueError("sample index out of range")
+        return self.inputs.index_select(1, indices), self.target.index_select(1, indices)
 
     def prediction(self, parameter: Tensor) -> Tensor:
         self._validate_parameter(parameter)
         hidden = torch.tanh(parameter @ self.inputs)
         return self.readout @ hidden
 
+    def prediction_on_samples(self, parameter: Tensor, sample_indices: Tensor) -> Tensor:
+        self._validate_parameter(parameter)
+        inputs, _ = self._sample_view(sample_indices)
+        hidden = torch.tanh(parameter @ inputs)
+        return self.readout @ hidden
+
     def loss(self, parameter: Tensor) -> Tensor:
         residual = self.prediction(parameter) - self.target
-        return 0.5 * residual.square().sum() / self.inputs.shape[1]
+        return 0.5 * residual.square().sum() / self.sample_count
+
+    def loss_on_samples(self, parameter: Tensor, sample_indices: Tensor) -> Tensor:
+        self._validate_parameter(parameter)
+        inputs, target = self._sample_view(sample_indices)
+        hidden = torch.tanh(parameter @ inputs)
+        residual = self.readout @ hidden - target
+        return 0.5 * residual.square().sum() / sample_indices.numel()
 
     def grad(self, parameter: Tensor) -> Tensor:
-        """Analytic gradient of the nonlinear objective with respect to ``W``."""
+        """Analytic full-batch gradient of the nonlinear objective with respect to ``W``."""
         self._validate_parameter(parameter)
         preactivation = parameter @ self.inputs
         hidden = torch.tanh(preactivation)
         residual = self.readout @ hidden - self.target
         hidden_grad = (self.readout.mT @ residual) * (1.0 - hidden.square())
-        return (hidden_grad @ self.inputs.mT) / self.inputs.shape[1]
+        return (hidden_grad @ self.inputs.mT) / self.sample_count
+
+    def grad_on_samples(self, parameter: Tensor, sample_indices: Tensor) -> Tensor:
+        """Analytic minibatch gradient, while ``loss`` remains the full-data metric."""
+        self._validate_parameter(parameter)
+        inputs, target = self._sample_view(sample_indices)
+        preactivation = parameter @ inputs
+        hidden = torch.tanh(preactivation)
+        residual = self.readout @ hidden - target
+        hidden_grad = (self.readout.mT @ residual) * (1.0 - hidden.square())
+        return (hidden_grad @ inputs.mT) / sample_indices.numel()
 
 
 def make_frozen_readout_mlp(
