@@ -16,22 +16,33 @@ The project is designed around three stages:
 
 ## Current milestone
 
-The first end-to-end path is implemented:
+Deterministic quadratic / coupled-quadratic work showed that raw L-BFGS is very strong
+when gradients are exact, which made optimizer distillation a weak story on full-batch
+tasks. The active milestone therefore moves to **stochastic mini-batch optimization**
+on `FrozenReadoutMLPTask`:
 
-- functional AdamW teacher;
-- reference Muon teacher with Newton-Schulz orthogonalization;
-- teacher-independent trajectory features;
-- serializable trajectory records/datasets;
-- a Celo2-base-like `8 -> 8 -> 8 -> 1` student (153 parameters);
-- direction + magnitude distillation losses;
-- a deterministic quadratic smoke task;
-- CI covering lint, unit tests, and end-to-end smoke distillation.
+- mini-batch gradients with full-data evaluation loss;
+- two teacher regimes: AdamW @ batch 32 and normalized gradient @ batch 8;
+- fixed 153-parameter matrix-aware student;
+- supervised distillation, closed-loop meta-finetuning, and direct-meta baseline;
+- condition-number OOD (`10 / 100 / 1000 / 3000`), batch-noise transfer, negative
+  controls, and feature ablations.
 
-The current student observation is deliberately small and teacher-independent:
+Preliminary multi-seed findings (details in `docs/experiments/stochastic_distillation.md`):
 
-`gradient, momentum, RMS, parameter, gradient sign, log|gradient|, parameter RMS, training progress`.
+- Distillation is a much stronger prior than from-scratch closed-loop meta-training
+  in both regimes.
+- The NormGrad@8 teacher policy is approximately compressible into the 153-parameter
+  student; closed-loop meta can slightly improve on the teacher.
+- For AdamW@32, a `norm_only` negative control matches the distilled student, so the
+  result is weaker than “AdamW-specific knowledge distillation.”
+- Raw L-BFGS collapses under mini-batch noise; Muon remains weaker than AdamW/NormGrad
+  on this benchmark.
 
-This makes teacher-size scaling experiments meaningful: a larger teacher is not allowed to secretly give the student more information.
+The working claim is therefore closer to **tiny stochastic update-policy learning with
+distillation as a strong prior** than to a blanket optimizer-knowledge-distillation
+success. Large learned teachers are deferred until a teacher is actually stronger than
+these analytic baselines under the same noise protocol.
 
 ## Development with uv
 
@@ -93,8 +104,12 @@ OptDistil/
 
 ## Next experiments
 
-1. Compare direct training of the 153-parameter student against teacher-distilled initialization.
-2. Sweep teacher capacity while keeping the student architecture and observations fixed.
-3. Add Muon-generated trajectories and compare single-teacher vs. mixed-teacher distillation.
-4. Add rollout loss and downstream meta-finetuning.
-5. Introduce NPU-native student observations and measure loss per wall-clock time / joule.
+1. Treat NormGrad under mini-batch noise as the primary compression target and harden
+   that claim with longer horizons.
+2. Decide whether AdamW is still a useful teacher on this task family, or move to a
+   family where AdamW/Muon genuinely dominate normalized gradient.
+3. Separate fixed step-size policies from true stochastic robustness with stronger
+   batch-noise transfer tests.
+4. Only then introduce large learned teachers that are empirically stronger than
+   AdamW/NormGrad/Muon under the same protocol.
+5. Continue NPU-oriented student observations and cost measurements.
