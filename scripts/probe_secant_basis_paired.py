@@ -8,7 +8,6 @@ from dataclasses import asdict
 from pathlib import Path
 
 import torch
-
 from probe_oracle_feature_bottleneck import (
     DISTILL_WEIGHTS,
     STUDENT_SCALE_CANDIDATES,
@@ -22,9 +21,10 @@ from probe_oracle_feature_bottleneck import (
 )
 
 from optdistil.distill.features import build_gram_matrix_features, build_matrix_aware_features
+from optdistil.distill.rollout import select_student_output_scale
 from optdistil.distill.secant_features import SecantFeatureState
-from optdistil.distill.trajectory import TrajectoryRecord
 from optdistil.distill.train import train_student
+from optdistil.distill.trajectory import TrajectoryRecord
 from optdistil.students.tiny_mlp import StudentState, TinyMLPOptimizer
 
 
@@ -246,8 +246,6 @@ def main() -> None:
                     )
                 else:
                     feature_builder = dict(stateless_specs)[feature_name]
-                    from optdistil.distill.rollout import select_student_output_scale
-
                     selection = select_student_output_scale(
                         student,
                         student_validation_cases,
