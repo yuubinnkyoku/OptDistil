@@ -5,6 +5,7 @@ import json
 import math
 import statistics
 from dataclasses import dataclass
+from itertools import pairwise
 from pathlib import Path
 from typing import Any
 
@@ -178,7 +179,7 @@ def _aulc(losses: list[float]) -> float:
         return 1.0
     initial = max(abs(losses[0]), 1e-12)
     area = 0.0
-    for left, right in zip(losses[:-1], losses[1:], strict=True):
+    for left, right in pairwise(losses):
         if not (math.isfinite(left) and math.isfinite(right)):
             return math.inf
         area += 0.5 * (left + right)
