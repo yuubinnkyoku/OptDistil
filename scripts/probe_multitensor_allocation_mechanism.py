@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import json
 import math
+import os
 import statistics
 from dataclasses import dataclass
 from itertools import pairwise
@@ -492,11 +493,32 @@ def main() -> None:
             }
         )
 
+    config = vars(args) | {"output": str(args.output)}
+    split_specs = {
+        "architectures": list(ARCHITECTURES),
+        "train_conditions": list(TRAIN_CONDITIONS),
+        "ood_conditions": list(OOD_CONDITIONS),
+        "seed_bases": {
+            "lr_validation": 411000,
+            "distill": 421000,
+            "scale_validation": 431000,
+            "allocation_calibration": 481000,
+            "test": 461000,
+            "ood": 471000,
+            "residual_offset": 500000,
+        },
+    }
+    commit_sha = git_commit_sha()
     payload = {
         "experiment": "multitensor_normgrad_allocation_mechanism",
-        "git_sha": git_commit_sha(),
-        "metadata": artifact_metadata(),
-        "config": vars(args) | {"output": str(args.output)},
+        "git_sha": commit_sha,
+        "metadata": artifact_metadata(
+            run_id=os.environ.get("GITHUB_RUN_ID", "local"),
+            commit_sha=commit_sha,
+            config=config,
+            split_specs=split_specs,
+        ),
+        "config": config,
         "teacher": {
             "name": TEACHER_NAME,
             "lr": teacher_lr,
