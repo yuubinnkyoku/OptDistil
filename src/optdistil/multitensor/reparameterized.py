@@ -157,6 +157,7 @@ class FunctionSpaceNormGradTeacher:
             raise ValueError("parameter, gradient, and scale counts must match")
         updates: list[Tensor] = []
         for grad, scale in zip(grads, self.parameter_scales, strict=True):
-            norm = grad.reshape(-1).float().norm().clamp_min(self.eps)
+            norm_dtype = torch.float64 if grad.dtype == torch.float64 else torch.float32
+            norm = grad.reshape(-1).to(norm_dtype).norm().clamp_min(self.eps)
             updates.append(-self.lr * grad / (scale * norm.to(grad.dtype)))
         return updates
