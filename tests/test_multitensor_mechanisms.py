@@ -4,6 +4,7 @@ import torch
 from optdistil.multitensor.mechanisms import (
     aggregate_role_scales,
     apply_direction_scales,
+    coordinate_descent_role_scales,
     equalized_role_scales,
     global_projection,
     scales_for_names,
@@ -65,3 +66,22 @@ def test_role_scale_aggregation_equalize_swap_and_resolution() -> None:
     assert scales_for_names(("W2", "W_skip", "unknown"), role_scales) == pytest.approx(
         [0.3, 0.7, 0.4]
     )
+
+
+def test_coordinate_descent_role_scales_recovers_grid_optimum() -> None:
+    target = {"W1": 0.5, "b1": 0.25, "W2": 1.0}
+
+    def evaluate(scales) -> float:
+        return sum((float(scales[name]) - value) ** 2 for name, value in target.items())
+
+    scales, score, history = coordinate_descent_role_scales(
+        tuple(target),
+        (0.25, 0.5, 1.0, 2.0),
+        evaluate,
+        initial_scale=1.0,
+        passes=3,
+    )
+
+    assert scales == pytest.approx(target)
+    assert score == pytest.approx(0.0)
+    assert history[0]["role"] == "initial"
