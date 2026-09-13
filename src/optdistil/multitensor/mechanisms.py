@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import statistics
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 
 import torch
 from torch import Tensor
@@ -139,3 +139,64 @@ def swapped_role_scales(role_scales: Mapping[str, float]) -> dict[str, float]:
         if left in swapped and right in swapped:
             swapped[left], swapped[right] = swapped[right], swapped[left]
     return swapped
+
+
+def coordinate_descent_role_scales(
+    role_names: Sequence[str],
+    candidates: Sequence[float],
+    evaluate: Callable[[Mapping[str, float]], float],
+    *,
+    initial_scale: float,
+    passes: int = 3,
+) -> tuple[dict[str, float], float, list[dict[str, object]]]:
+    """Tune static role scales using only a caller-provided validation objective.
+
+    The search is deterministic coordinate descent over absolute scale candidates.
+    It is intentionally simple: the goal is a strong low-dimensional analytic control,
+    not a learned optimizer. ``evaluate`` must use validation data only.
+    """
+    roles = tuple(dict.fromkeys(str(name) for name in role_names))
+    values = tuple(float(value) for value in candidates)
+    if not roles:
+        raise ValueError("role_names must be non-empty")
+    if not values or any(value <= 0.0 for value in values):
+        raise ValueError("candidates must contain positive scales")
+    if initial_scale <= 0.0:
+        raise ValueError("initial_scale must be positive")
+    if passes <= 0:
+        raise ValueError("passes must be positive")
+
+    scales = {name: float(initial_scale) for name in roles}
+    best_score = float(evaluate(scales))
+    history: list[dict[str, object]] = [
+        {"pass": -1, "role": "initial", "scale": initial_scale, "score": best_score}
+    ]
+
+    for pass_index in range(passes):
+        changed = False
+        for role in roles:
+            current_scale = scales[role]
+            role_best_scale = current_scale
+            role_best_score = best_score
+            for candidate in values:
+                trial = dict(scales)
+                trial[role] = candidate
+                score = float(evaluate(trial))
+                if score < role_best_score:
+                    role_best_score = score
+                    role_best_scale = candidate
+            scales[role] = role_best_scale
+            best_score = role_best_score
+            changed |= role_best_scale != current_scale
+            history.append(
+                {
+                    "pass": pass_index,
+                    "role": role,
+                    "scale": role_best_scale,
+                    "score": role_best_score,
+                }
+            )
+        if not changed:
+            break
+
+    return scales, best_score, history
