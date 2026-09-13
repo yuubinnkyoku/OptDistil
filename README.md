@@ -44,6 +44,19 @@ distillation as a strong prior** than to a blanket optimizer-knowledge-distillat
 success. Large learned teachers are deferred until a teacher is actually stronger than
 these analytic baselines under the same noise protocol.
 
+A follow-up **reparameterization stress benchmark** (`docs/experiments/reparam_stress.md`)
+asks whether the 153-param multi-tensor Student is an adaptive scale inferer or whether
+fixed tensor-role learning rates already explain the result:
+
+- positive diagonal `p_i = s_i θ_i` with unseen IID/OOD scale ranges;
+- Student cannot observe `s_i`; privileged controls can;
+- 5 seeds, paired tasks, bootstrap CIs;
+- static shared-role NormGrad (2 parameters) **beats** the 153p Student and 27p
+  structured controllers under this stress test.
+
+Primary supported claim: **A. fixed tensor-role LR is sufficient**. Do not describe the
+Student as a state-dependent adaptive learned optimizer on the current evidence.
+
 ## Development with uv
 
 OptDistil uses [uv](https://docs.astral.sh/uv/) for dependency management and reproducible development environments. Python 3.11 is pinned for local development in `.python-version`, while the package itself supports Python 3.10 and newer.
