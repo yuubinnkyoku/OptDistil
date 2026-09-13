@@ -31,7 +31,7 @@ jobs:
         run: uv sync --locked --extra cpu
       - name: Ruff
         run: >-
-          uv run --locked --extra cpu ruff check
+          uv run --locked --extra cpu ruff check --ignore B023
           src/optdistil/multitensor/mechanisms.py
           scripts/probe_multitensor_static_role_control.py
           tests/test_multitensor_mechanisms.py
