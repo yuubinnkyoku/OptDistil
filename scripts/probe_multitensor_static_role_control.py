@@ -6,6 +6,7 @@ import math
 import os
 import statistics
 from dataclasses import dataclass
+from functools import partial
 from itertools import pairwise
 from pathlib import Path
 from typing import Any
@@ -251,14 +252,12 @@ def tune_architecture_scales(
     for architecture in ARCHITECTURES:
         cases = validation_by_architecture[architecture]
         role_names = tuple(str(name) for name in cases[0].task.parameter_names)
-
-        def evaluate(role_scales) -> float:
-            return validation_score(
-                cases,
-                dict(role_scales),
-                batch_size=batch_size,
-                steps=steps,
-            )
+        evaluate = partial(
+            validation_score,
+            cases,
+            batch_size=batch_size,
+            steps=steps,
+        )
 
         selected, score, history = coordinate_descent_role_scales(
             role_names,
