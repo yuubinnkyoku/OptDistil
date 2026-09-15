@@ -6,7 +6,7 @@ A. Computation ladder on the base multitensor family (SGD / NormGrad / AdamW x u
 B. Computation ladder on IID reparameterization stress cases
 C. Role-label permutation (true / swap / random partitions) on base family
 D. Frozen-ratio transfer to three_layer and width OOD
-E. Inverted role-aligned reparameterization family (matrix s << vector s)
+E. Inverted role-aligned reparameterization family (s_matrix ≫ s_vector)
 """
 
 from __future__ import annotations
@@ -56,8 +56,6 @@ INVERT_SCALE_VECTOR = 0.1
 # Distinct seed bases; never used for both tuning and test.
 SOURCE_VAL_SEED = 711000
 SOURCE_TEST_SEED = 721000
-REPARAM_VAL_SEED = 731000
-REPARAM_TEST_SEED = 741000
 THREE_LAYER_VAL_SEED = 751000
 THREE_LAYER_TEST_SEED = 761000
 WIDTH_OOD_SEED = 771000
@@ -327,8 +325,6 @@ def experiment_permutation(
     for index in range(n_random):
         kinds.append((f"random_partition_{index}", "random", PERM_SEED + index))
 
-    true_test_by_arch: dict[str, list[float]] = {}
-    # First pass: tune+eval true partition so randoms can be paired within arch.
     payload_by_kind: dict[str, dict[str, Any]] = {}
     for name, kind, seed in kinds:
         ratios_all: list[float] = []
@@ -359,8 +355,6 @@ def experiment_permutation(
                 steps=steps,
             )
             ratios_all.extend(ratios)
-            if kind == "true":
-                true_test_by_arch[architecture] = ratios
         payload_by_kind[name] = {
             "name": name,
             "kind": kind,
@@ -673,8 +667,6 @@ def main() -> None:
         "seed_bases": {
             "source_val": SOURCE_VAL_SEED,
             "source_test": SOURCE_TEST_SEED,
-            "reparam_val": REPARAM_VAL_SEED,
-            "reparam_test": REPARAM_TEST_SEED,
             "three_layer_val": THREE_LAYER_VAL_SEED,
             "three_layer_test": THREE_LAYER_TEST_SEED,
             "width_ood": WIDTH_OOD_SEED,

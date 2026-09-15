@@ -81,12 +81,18 @@ No learned optimizer is required.
 | random partition 2 | random | 0.0747 | −0.0002 | 8/32 |
 
 Bootstrap 95% CI for best random − true: **[−0.0057, −0.0004]** (random slightly
-better).
+better). Caveat: “best of 3 randoms” is mildly optimistic as a point estimate;
+the qualitative claim (true labels are not required) still holds for every
+random partition shown.
 
 **Conclusion:** the *name* “matrix vs vector” is not special. Any balanced
 two-way partition of tensors, re-tuned on validation with the same budget,
 matches or slightly beats the structural matrix/vector split. The useful
 ingredient is **two-way heterogeneous NormGrad LRs**, not tensor rank.
+
+Note: the swapped-label control is a pure rename when both LRs are re-tuned,
+so zero difference is expected by construction; the informative controls are
+the random partitions.
 
 ## D. Frozen-ratio transfer (within planting geometry)
 
