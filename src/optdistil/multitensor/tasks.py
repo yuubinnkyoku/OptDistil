@@ -247,6 +247,115 @@ class ResidualMLPRegressionTask:
         return self._analytic_grads(tensors, inputs, target)
 
 
+class ThreeLayerMLPRegressionTask:
+    """Three-layer tanh MLP regression with planted targets.
+
+    parameters: W1, b1, W2, b2, W3, b3
+    prediction: W3 @ tanh(W2 @ tanh(W1 @ x + b1) + b2) + b3
+    """
+
+    def __init__(self, inputs: Tensor, target: Tensor, *, hidden_dim: int) -> None:
+        if inputs.ndim != 2 or target.ndim != 2:
+            raise ValueError("inputs and target must be matrices")
+        if inputs.shape[1] != target.shape[1]:
+            raise ValueError("inputs and target must share sample count")
+        if hidden_dim <= 0:
+            raise ValueError("hidden_dim must be positive")
+        self.inputs = inputs.detach().clone()
+        self.target = target.detach().clone()
+        self.hidden_dim = hidden_dim
+        self.input_dim = inputs.shape[0]
+        self.output_dim = target.shape[0]
+        self._parameter_shapes = [
+            torch.Size((hidden_dim, self.input_dim)),
+            torch.Size((hidden_dim,)),
+            torch.Size((hidden_dim, hidden_dim)),
+            torch.Size((hidden_dim,)),
+            torch.Size((self.output_dim, hidden_dim)),
+            torch.Size((self.output_dim,)),
+        ]
+        self.parameter_names = ("W1", "b1", "W2", "b2", "W3", "b3")
+        self.parameter_roles = ("matrix", "vector", "matrix", "vector", "matrix", "vector")
+
+    @property
+    def parameter_shapes(self) -> list[torch.Size]:
+        return list(self._parameter_shapes)
+
+    @property
+    def sample_count(self) -> int:
+        return self.inputs.shape[1]
+
+    def _validate(self, params: ParamCollection) -> list[Tensor]:
+        if len(params) != len(self._parameter_shapes):
+            raise ValueError("parameter collection size mismatch")
+        for tensor, shape in zip(params, self._parameter_shapes, strict=True):
+            if tuple(tensor.shape) != shape:
+                raise ValueError(f"parameter shape mismatch: expected {shape}, got {tensor.shape}")
+        return list(params)
+
+    def _forward(self, params: Sequence[Tensor], inputs: Tensor) -> Tensor:
+        w1, b1, w2, b2, w3, b3 = params
+        h1 = torch.tanh(w1 @ inputs + b1.unsqueeze(1))
+        h2 = torch.tanh(w2 @ h1 + b2.unsqueeze(1))
+        return w3 @ h2 + b3.unsqueeze(1)
+
+    def prediction(self, params: ParamCollection) -> Tensor:
+        tensors = self._validate(params)
+        return self._forward(tensors, self.inputs)
+
+    def prediction_on_samples(self, params: ParamCollection, sample_indices: Tensor) -> Tensor:
+        tensors = self._validate(params)
+        indices = _validate_indices(sample_indices, self.sample_count).to(self.inputs.device)
+        return self._forward(tensors, self.inputs.index_select(1, indices))
+
+    def loss(self, params: ParamCollection) -> Tensor:
+        residual = self.prediction(params) - self.target
+        return 0.5 * residual.square().sum() / self.sample_count
+
+    def loss_on_samples(self, params: ParamCollection, sample_indices: Tensor) -> Tensor:
+        tensors = self._validate(params)
+        indices = _validate_indices(sample_indices, self.sample_count).to(self.inputs.device)
+        inputs = self.inputs.index_select(1, indices)
+        target = self.target.index_select(1, indices)
+        residual = self._forward(tensors, inputs) - target
+        return 0.5 * residual.square().sum() / indices.numel()
+
+    def _analytic_grads(
+        self,
+        params: Sequence[Tensor],
+        inputs: Tensor,
+        target: Tensor,
+    ) -> list[Tensor]:
+        w1, b1, w2, b2, w3, b3 = params
+        n = inputs.shape[1]
+        preact1 = w1 @ inputs + b1.unsqueeze(1)
+        h1 = torch.tanh(preact1)
+        preact2 = w2 @ h1 + b2.unsqueeze(1)
+        h2 = torch.tanh(preact2)
+        pred = w3 @ h2 + b3.unsqueeze(1)
+        residual = pred - target
+        g_w3 = residual @ h2.mT / n
+        g_b3 = residual.sum(dim=1) / n
+        h2_grad = (w3.mT @ residual) * (1.0 - h2.square())
+        g_w2 = h2_grad @ h1.mT / n
+        g_b2 = h2_grad.sum(dim=1) / n
+        h1_grad = (w2.mT @ h2_grad) * (1.0 - h1.square())
+        g_w1 = h1_grad @ inputs.mT / n
+        g_b1 = h1_grad.sum(dim=1) / n
+        return [g_w1, g_b1, g_w2, g_b2, g_w3, g_b3]
+
+    def grad(self, params: ParamCollection) -> list[Tensor]:
+        tensors = self._validate(params)
+        return self._analytic_grads(tensors, self.inputs, self.target)
+
+    def grad_on_samples(self, params: ParamCollection, sample_indices: Tensor) -> list[Tensor]:
+        tensors = self._validate(params)
+        indices = _validate_indices(sample_indices, self.sample_count).to(self.inputs.device)
+        inputs = self.inputs.index_select(1, indices)
+        target = self.target.index_select(1, indices)
+        return self._analytic_grads(tensors, inputs, target)
+
+
 def _make_conditioned_inputs(
     generator: torch.Generator,
     *,
@@ -399,6 +508,67 @@ def make_residual_mlp(
     return initial, task
 
 
+def make_three_layer_mlp(
+    seed: int,
+    *,
+    input_dim: int = 8,
+    hidden_dim: int = 8,
+    output_dim: int = 4,
+    samples: int = 64,
+    input_condition: float = 30.0,
+    planted_scale: float = 0.7,
+    initial_scale: float = 0.2,
+    device: torch.device | str = "cpu",
+    dtype: torch.dtype = torch.float32,
+) -> tuple[ParamCollection, ThreeLayerMLPRegressionTask]:
+    if min(input_dim, hidden_dim, output_dim, samples) <= 0:
+        raise ValueError("all dimensions and sample count must be positive")
+    generator = torch.Generator(device="cpu").manual_seed(seed)
+    inputs = _make_conditioned_inputs(
+        generator,
+        input_dim=input_dim,
+        samples=samples,
+        input_condition=input_condition,
+    )
+
+    def _mat(out_dim: int, in_dim: int, scale: float) -> Tensor:
+        return torch.randn((out_dim, in_dim), generator=generator) * scale / math.sqrt(in_dim)
+
+    def _vec(dim: int, scale: float) -> Tensor:
+        return torch.randn((dim,), generator=generator) * scale * 0.1
+
+    planted = [
+        _mat(hidden_dim, input_dim, planted_scale),
+        _vec(hidden_dim, planted_scale),
+        _mat(hidden_dim, hidden_dim, planted_scale),
+        _vec(hidden_dim, planted_scale),
+        _mat(output_dim, hidden_dim, planted_scale),
+        _vec(output_dim, planted_scale),
+    ]
+    h1 = torch.tanh(planted[0] @ inputs + planted[1].unsqueeze(1))
+    h2 = torch.tanh(planted[2] @ h1 + planted[3].unsqueeze(1))
+    target = planted[4] @ h2 + planted[5].unsqueeze(1)
+
+    initial = ParamCollection(
+        [
+            _mat(hidden_dim, input_dim, initial_scale),
+            _vec(hidden_dim, initial_scale),
+            _mat(hidden_dim, hidden_dim, initial_scale),
+            _vec(hidden_dim, initial_scale),
+            _mat(output_dim, hidden_dim, initial_scale),
+            _vec(output_dim, initial_scale),
+        ]
+    )
+    device = torch.device(device)
+    initial = initial.to(device=device, dtype=dtype)
+    task = ThreeLayerMLPRegressionTask(
+        inputs.to(device=device, dtype=dtype),
+        target.to(device=device, dtype=dtype),
+        hidden_dim=hidden_dim,
+    )
+    return initial, task
+
+
 def make_task(
     architecture: str,
     seed: int,
@@ -425,6 +595,16 @@ def make_task(
         )
     if architecture == "residual":
         return make_residual_mlp(
+            seed,
+            input_dim=width,
+            hidden_dim=width,
+            output_dim=output_dim,
+            samples=samples,
+            input_condition=input_condition,
+            device=device,
+        )
+    if architecture == "three_layer":
+        return make_three_layer_mlp(
             seed,
             input_dim=width,
             hidden_dim=width,

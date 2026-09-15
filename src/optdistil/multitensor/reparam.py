@@ -115,6 +115,30 @@ class ReparameterizedTask:
         return self._to_g_theta(self.inner.grad_on_samples(self._to_p(params), sample_indices))
 
 
+def role_aligned_scales(
+    roles: Sequence[str],
+    *,
+    matrix_scale: float,
+    vector_scale: float,
+) -> list[float]:
+    """Constant scales by role name for role-aligned reparameterization.
+
+    Privileged function-space NormGrad matches ordinary NormGrad with
+    per-tensor θ-space scale ``c_i = lr / s_i``. To invert the usual
+    base-family pattern (matrix θ-LR ≫ vector θ-LR), choose
+    ``matrix_scale ≫ vector_scale`` so vectors need larger θ-steps.
+    """
+    if matrix_scale <= 0 or vector_scale <= 0:
+        raise ValueError("role scales must be positive")
+    mapping = {"matrix": float(matrix_scale), "vector": float(vector_scale)}
+    values: list[float] = []
+    for role in roles:
+        if role not in mapping:
+            raise KeyError(f"unknown role for role-aligned scales: {role!r}")
+        values.append(mapping[role])
+    return values
+
+
 def reparameterize_initial(
     initial: ParamCollection,
     scales: Sequence[float],

@@ -54,8 +54,21 @@ fixed tensor-role learning rates already explain the result:
 - static shared-role NormGrad (2 parameters) **beats** the 153p Student and 27p
   structured controllers under this stress test.
 
-Primary supported claim: **A. fixed tensor-role LR is sufficient**. Do not describe the
-Student as a state-dependent adaptive learned optimizer on the current evidence.
+A further **minimum-computation / role-falsification** study
+(`docs/experiments/minimum_computation.md`) shows:
+
+- NormGrad + two validation-tuned role LRs is the strongest cheap method on this
+  family; uniform NormGrad is close; SGD collapses under reparameterization;
+- random balanced two-way tensor partitions match the matrix/vector split, so
+  the *labels* are not special;
+- under role-aligned reparameterization that inverts required θ-steps, the
+  source matrix≫vector ratio fails and re-tuning flips the ratio — the *ratio*
+  is a family artifact, not a universal principle.
+
+Primary supported claim: **per-tensor normalized gradient plus a small number of
+validation-tuned heterogeneous LRs is sufficient on this synthetic family**.
+Do not describe the Student as a state-dependent adaptive learned optimizer, and
+do not claim a universal matrix/vector optimizer principle.
 
 ## Development with uv
 
@@ -117,12 +130,9 @@ OptDistil/
 
 ## Next experiments
 
-1. Treat NormGrad under mini-batch noise as the primary compression target and harden
-   that claim with longer horizons.
-2. Decide whether AdamW is still a useful teacher on this task family, or move to a
-   family where AdamW/Muon genuinely dominate normalized gradient.
-3. Separate fixed step-size policies from true stochastic robustness with stronger
-   batch-noise transfer tests.
-4. Only then introduce large learned teachers that are empirically stronger than
-   AdamW/NormGrad/Muon under the same protocol.
-5. Continue NPU-oriented student observations and cost measurements.
+1. Treat the minimum-computation ladder + role-permutation/inversion results as
+   the current baseline story; do not scale Student capacity on this family.
+2. If the research continues, move to a non-planted or real-data family where
+   static two-way LRs may fail, with LARS/AdamW role baselines already available.
+3. Only introduce a learned teacher if it is empirically stronger than
+   NormGrad + role LRs under the same fair-budget protocol.

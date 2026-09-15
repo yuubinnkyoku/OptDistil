@@ -267,6 +267,75 @@ class LBFGSMultiTensor(MultiTensorTeacher):
         return r
 
 
+class RoleScaledSGD(MultiTensorTeacher):
+    """SGD with one positive LR per tensor: u_l = -lr_l * g_l."""
+
+    def __init__(self, *, scales: Sequence[float]) -> None:
+        if not scales:
+            raise ValueError("scales must be non-empty")
+        values = [float(s) for s in scales]
+        if any(s <= 0 for s in values):
+            raise ValueError("scales must be positive")
+        self.scales = values
+
+    @torch.no_grad()
+    def step(self, params: ParamCollection, grads: Sequence[Tensor]) -> list[Tensor]:
+        grad_list = _check_shapes(params, grads)
+        if len(grad_list) != len(self.scales):
+            raise ValueError("grad count must match scale count")
+        return [-scale * grad for scale, grad in zip(self.scales, grad_list, strict=True)]
+
+
+class RoleScaledAdamW(MultiTensorTeacher):
+    """AdamW with one LR per tensor; moments remain per-element."""
+
+    def __init__(
+        self,
+        *,
+        scales: Sequence[float],
+        betas: tuple[float, float] = (0.9, 0.999),
+        eps: float = 1e-8,
+        weight_decay: float = 0.0,
+    ) -> None:
+        if not scales:
+            raise ValueError("scales must be non-empty")
+        values = [float(s) for s in scales]
+        if any(s <= 0 for s in values):
+            raise ValueError("scales must be positive")
+        self.scales = values
+        self.beta1, self.beta2 = betas
+        self.eps = eps
+        self.weight_decay = weight_decay
+        self.step_number = 0
+        self.m: list[Tensor] | None = None
+        self.v: list[Tensor] | None = None
+
+    @torch.no_grad()
+    def step(self, params: ParamCollection, grads: Sequence[Tensor]) -> list[Tensor]:
+        grad_list = _check_shapes(params, grads)
+        if len(grad_list) != len(self.scales):
+            raise ValueError("grad count must match scale count")
+        if self.m is None or self.v is None:
+            self.m = [torch.zeros_like(grad) for grad in grad_list]
+            self.v = [torch.zeros_like(grad) for grad in grad_list]
+        self.step_number += 1
+        bias1 = 1.0 - self.beta1**self.step_number
+        bias2 = 1.0 - self.beta2**self.step_number
+        updates: list[Tensor] = []
+        for m, v, grad, parameter, lr in zip(
+            self.m, self.v, grad_list, params, self.scales, strict=True
+        ):
+            m.mul_(self.beta1).add_(grad, alpha=1.0 - self.beta1)
+            v.mul_(self.beta2).addcmul_(grad, grad, value=1.0 - self.beta2)
+            m_hat = m / bias1
+            v_hat = v / bias2
+            update = -lr * m_hat / (v_hat.sqrt() + self.eps)
+            if self.weight_decay:
+                update = update.add(parameter, alpha=-lr * self.weight_decay)
+            updates.append(update)
+        return updates
+
+
 def make_teacher(method: str, lr: float) -> MultiTensorTeacher:
     if method == "sgd":
         return SGDMultiTensor(lr=lr)
