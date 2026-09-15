@@ -3,7 +3,7 @@ feature: minimum-optimizer-computation
 status: delivered
 updated: 2026-02-16
 branch: experiment/stochastic-distillation
-commits: c117667..HEAD
+commits: c117667..3103dab
 ---
 
 # Minimum Optimizer Computation
