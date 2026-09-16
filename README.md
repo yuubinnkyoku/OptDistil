@@ -65,10 +65,19 @@ A further **minimum-computation / role-falsification** study
   source matrix≫vector ratio fails and re-tuning flips the ratio — the *ratio*
   is a family artifact, not a universal principle.
 
-Primary supported claim: **per-tensor normalized gradient plus a small number of
-validation-tuned heterogeneous LRs is sufficient on this synthetic family**.
-Do not describe the Student as a state-dependent adaptive learned optimizer, and
-do not claim a universal matrix/vector optimizer principle.
+A **computation frontier** study (`docs/experiments/computation_frontier.md`)
+pushes one step further:
+
+- 1 uniform LR is **statistically distinguishable** from 2 role LRs (paired);
+- the best 2-way split is **numel rank**, not matrix/vector;
+- a **zero-validation `numel_rank` formula** nearly matches tuned 2-group;
+- k=3 does not beat k=2; per-tensor oracle only adds ~0.004;
+- equal-shape `iso_shape` blocks show almost no benefit from extra groups.
+
+Primary supported claim: **NormGrad + numel-based static scale heterogeneity
+(2 groups or a closed-form rank map) is the minimum sufficient computation on
+this synthetic family**. Do not claim adaptive learned optimizers or universal
+matrix/vector semantics.
 
 ## Development with uv
 
